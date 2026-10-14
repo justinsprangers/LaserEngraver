@@ -22,14 +22,31 @@ Can also be run from the command line:
 
 import json
 import os
+import sys
 from dataclasses import dataclass, asdict, fields
+
+VERSION = "1.0.0"
+
+# Where things live. Running from source, everything is in this folder. As an installed app
+# (PyInstaller sets sys.frozen), the program folder is read-only, so user data goes to
+# %APPDATA%\LaserEngraver and engravings default to Documents\Laser Engraver.
+FROZEN = getattr(sys, "frozen", False)
+HERE = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))   # bundled files
+if FROZEN:
+    DATA_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "LaserEngraver")
+    DEFAULT_OUT = os.path.join(os.path.expanduser("~"), "Documents", "Laser Engraver")
+    os.environ.setdefault("NUMBA_CACHE_DIR", os.path.join(
+        os.environ.get("LOCALAPPDATA", DATA_DIR), "LaserEngraver", "numba_cache"))
+else:
+    DATA_DIR = HERE
+    DEFAULT_OUT = os.path.join(HERE, "output")
 
 import cv2
 import numpy as np
 from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-MATERIALS_FILE = os.path.join(HERE, "materials.json")
+MATERIALS_FILE = os.path.join(DATA_DIR, "materials.json")     # your editable copy
+BUNDLED_MATERIALS = os.path.join(HERE, "materials.json")      # shipped defaults
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tiff", ".tif")
 DITHER_MODES = ("stucki", "floyd-steinberg", "bayer", "none")
 STYLES = ("photo", "comic")
@@ -114,23 +131,26 @@ class Settings:
         return mm * self.dpi / 25.4
 
 
+def _read_materials_file():
+    """Full materials.json contents: your copy if it exists, else the shipped one."""
+    for path in (MATERIALS_FILE, BUNDLED_MATERIALS):
+        try:
+            with open(path, encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            pass
+    return dict(DEFAULT_MATERIALS)
+
+
 def load_materials():
-    try:
-        with open(MATERIALS_FILE, encoding="utf-8") as f:
-            data = json.load(f)
-        return {k: v for k, v in data.items() if not k.startswith("_")}
-    except (OSError, ValueError):
-        return dict(DEFAULT_MATERIALS)
+    return {k: v for k, v in _read_materials_file().items() if not k.startswith("_")}
 
 
 def save_material(name, profile):
     """Add or overwrite one material in materials.json."""
-    try:
-        with open(MATERIALS_FILE, encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, ValueError):
-        data = dict(DEFAULT_MATERIALS)
+    data = _read_materials_file()
     data[name] = profile
+    os.makedirs(DATA_DIR, exist_ok=True)
     with open(MATERIALS_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
@@ -262,7 +282,12 @@ def _stucki_loop(arr):
 # Python loop still works, just slowly (tens of seconds per photo).
 try:
     import numba
-    _stucki_fast = numba.njit(cache=True, nogil=True)(_stucki_loop)
+    try:
+        _stucki_fast = numba.njit(cache=True, nogil=True)(_stucki_loop)
+    except Exception:
+        # Caching needs the .py source next to the code; a packaged app may not have it.
+        # Still fast, just recompiles (~1 s) on first use each launch.
+        _stucki_fast = numba.njit(nogil=True)(_stucki_loop)
     FAST_STUCKI = True
 except Exception:
     _stucki_fast = _stucki_loop
@@ -574,7 +599,7 @@ if __name__ == "__main__":
     ap.add_argument("--outline", action="store_true", help="also save a cut-outline SVG")
     ap.add_argument("--outline-offset", type=float, default=0.1, help="inches outside the subject")
     ap.add_argument("--test-card", action="store_true", help="save a contrast/gamma test card instead")
-    ap.add_argument("--out", default=os.path.join(HERE, "output"))
+    ap.add_argument("--out", default=DEFAULT_OUT)
     ap.add_argument("--preview", action="store_true", help="also save a side-by-side JPEG")
     a = ap.parse_args()
 

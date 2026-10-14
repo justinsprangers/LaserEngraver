@@ -8,6 +8,8 @@ All image processing lives in engrave_core.py; this file is only the window.
 import json
 import os
 import queue
+import subprocess
+import sys
 import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor
@@ -19,9 +21,9 @@ from PIL import Image, ImageOps, ImageTk
 
 import engrave_core as core
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-STATE_FILE = os.path.join(HERE, "settings.json")
-DEFAULT_OUT = os.path.join(HERE, "output")
+STATE_FILE = os.path.join(core.DATA_DIR, "settings.json")
+DEFAULT_OUT = core.DEFAULT_OUT
+ICON = os.path.join(core.HERE, "icon.ico")
 DPI_CHOICES = ("254", "318", "423", "508")   # 0.10, 0.08, 0.06, 0.05 mm line interval
 ZOOMS = ("Fit", "25%", "50%", "100%", "200%", "400%")
 VIEWS = ("Original", "Adjusted", "Engraving", "Material look")
@@ -111,7 +113,9 @@ class App:
             self.vars[name] = v
         self.vars["material"].trace_add("write", lambda *_: self.on_material())
 
-        root.title("Laser Engraver")
+        root.title(f"Laser Engraver {core.VERSION}")
+        if os.path.exists(ICON):
+            root.iconbitmap(default=ICON)
         if state.get("geometry"):
             root.geometry(state["geometry"])
         if state.get("maximized", True):
@@ -543,7 +547,11 @@ class App:
         os.startfile(self.out_dir.get())
 
     def open_help(self):
-        os.startfile(os.path.join(HERE, "README.md"))
+        readme = os.path.join(core.HERE, "README.md")
+        try:
+            os.startfile(readme)
+        except OSError:                      # no app registered for .md files
+            subprocess.Popen(["notepad.exe", readme])
 
     # -------------------------------------------------------------- preview
 
@@ -758,6 +766,7 @@ class App:
         if self.root.state() == "normal":
             state["geometry"] = self.root.geometry()
         try:
+            os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
             with open(STATE_FILE, "w", encoding="utf-8") as f:
                 json.dump(state, f, indent=2)
         except OSError:
@@ -768,7 +777,35 @@ class App:
         messagebox.showerror("Unexpected error", "".join(traceback.format_exception(exc, val, tb))[-1500:])
 
 
+def selftest(report_path):
+    """Headless check that the bundled libraries work (build.py runs this after building)."""
+    import time
+    import numpy as np
+    lines, ok = [], True
+    yy, xx = np.mgrid[0:600, 0:500]
+    img = Image.fromarray(((xx + yy) % 256).astype(np.uint8)).convert("RGB")
+    path = os.path.join(os.path.dirname(report_path), "selftest_input.png")
+    img.save(path)
+    for label, kw in (("photo/stucki", {}), ("comic", {"style": "comic"}),
+                      ("remove background", {"remove_bg": True})):
+        t = time.time()
+        try:
+            s = core.Settings(width_in=2.0, **kw)
+            core.render(*core.load_source(path, s.remove_bg), s)
+            lines.append(f"OK    {label}  {time.time() - t:.1f} s")
+        except Exception as e:
+            ok = False
+            lines.append(f"FAIL  {label}: {e!r}")
+    lines.append(f"fast stucki (numba): {core.FAST_STUCKI}")
+    ok = ok and core.FAST_STUCKI
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines + ["PASS" if ok else "FAIL"]) + "\n")
+    return 0 if ok else 1
+
+
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == "--selftest":
+        sys.exit(selftest(sys.argv[2]))
     try:
         import ctypes
         ctypes.windll.shcore.SetProcessDpiAwareness(1)   # crisp text on high-DPI screens

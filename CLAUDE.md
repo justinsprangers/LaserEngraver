@@ -13,4 +13,8 @@ Desktop app (tkinter) for preparing photos for laser engraving. See README.md fo
 - `engrave_app.py` only handles UI. Keep processing logic in `engrave_core.py` so the CLI and app stay in sync.
 - Material profiles live in `materials.json`. Keys starting with `_` are comments.
 - `settings.json` and `output/` are git-ignored.
+- Packaged with PyInstaller (one-folder) + Inno Setup via `build.bat` → `packaging/build.py`. Outputs `dist/`, `build/`, `installer/` are git-ignored.
+- When frozen, `core.FROZEN` is true: user data goes to `%APPDATA%\LaserEngraver`, output defaults to `Documents\Laser Engraver`, bundled read-only files are under `core.HERE` (`sys._MEIPASS`). From source, everything stays in this folder. Keep new file paths going through `core.DATA_DIR` / `core.HERE`.
+- `LaserEngraver.exe --selftest <report.txt>` runs photo, comic, and rembg headlessly; build.py runs it and refuses to make an installer if it fails. If you add a library, check it still passes.
+- Bump `VERSION` in `engrave_core.py` for each release; the installer reads it. Keep the `AppId` GUID in `installer.iss` unchanged so upgrades replace the old install.
 - Run with plain `python` (not `python -I`): packages are in user site-packages.

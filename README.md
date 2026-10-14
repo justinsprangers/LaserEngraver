@@ -8,11 +8,38 @@ A desktop app that turns photos into 1-bit engraving files. Two styles:
 - **Comic**: flat tones filled with halftone dots and crosshatching, plus bold ink outlines.
   Less realistic, more graphic, and much faster to burn.
 
-## Start it
+## Install it (normal use)
 
-Double-click **`Laser Engraver.bat`**. The first time, it installs any missing packages.
+Run **`installer\LaserEngraver-Setup-<version>.exe`**. It installs for your user only (no admin
+prompt) and adds *Laser Engraver* to the Start menu. Uninstall it from Windows Settings → Apps.
+Python isn't needed on the PC it's installed on, so you can copy the Setup file to another PC.
 
-If nothing opens, run it from a terminal to see the error:
+The installed app keeps its data in these places, which updates and reinstalls don't touch:
+
+| What | Where |
+|---|---|
+| Your materials (`materials.json`) and last-used settings | `%APPDATA%\LaserEngraver` |
+| Saved engravings (default) | `Documents\Laser Engraver` |
+| Background-removal AI model (downloaded on first use, 170 MB) | `%USERPROFILE%\.u2net` |
+
+The first background removal after installing can take a minute or two (one-time). After that
+it's about 2-3 s per photo.
+
+## Change it and make a new installer
+
+1. Edit the code (`engrave_core.py`, `engrave_app.py`) or `materials.json` in this folder.
+2. Try the change by double-clicking **`Laser Engraver.bat`**. It runs straight from the source,
+   no build needed. (Running from source keeps its own `settings.json` and `materials.json` in this
+   folder, separate from the installed app's.)
+3. When you're happy, raise `VERSION` near the top of `engrave_core.py` (e.g. 1.0.0 → 1.1.0) and
+   double-click **`build.bat`**. After ~3 minutes it self-tests the bundled app and writes
+   `installer\LaserEngraver-Setup-<version>.exe`.
+4. Run the new Setup to update the installed app in place.
+
+Building needs PyInstaller (`python -m pip install pyinstaller`) and Inno Setup 6
+(`winget install JRSoftware.InnoSetup`). Both are installed on this PC.
+
+If the source version won't open, run it from a terminal to see the error:
 
 ```
 python engrave_app.py
@@ -110,7 +137,10 @@ Run `python engrave_core.py -h` for all options.
 
 | File | Purpose |
 |---|---|
-| `Laser Engraver.bat` | Launcher. |
+| `Laser Engraver.bat` | Runs the app from source. |
+| `build.bat` | Builds the installer. |
+| `packaging/` | Build recipe: `build.py`, PyInstaller `LaserEngraver.spec`, Inno Setup `installer.iss`, `icon.ico`. |
+| `dist/`, `build/`, `installer/` | Build outputs (not in git). |
 | `engrave_app.py` | The window (tkinter). |
 | `engrave_core.py` | All image processing. Change the pipeline here. |
 | `materials.json` | Material profiles. |
