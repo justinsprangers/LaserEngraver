@@ -38,7 +38,17 @@ TIPS = {
     "sharpen_radius": "Unsharp-mask radius in px.",
     "sharpen_percent": "Unsharp-mask strength.",
     "sharpen_threshold": "Only sharpen edges stronger than this.",
+    "comic_levels": "Number of tone bands. 4 = black, crosshatch, dots, blank.",
+    "comic_smooth": "Flattening passes. More = smoother, more cartoon-like regions.",
+    "comic_dot_mm": "Spacing of halftone dots and hatch lines, in mm.\nGo bigger if fine dots burn together.",
+    "comic_line_block": "Area (px) used to find ink lines. Bigger = bolder shapes, fewer fine lines.",
+    "comic_line_c": "Line sensitivity. Higher = fewer, cleaner lines.",
+    "comic_line_weight": "Thicken ink lines by this many pixels.",
+    "comic_despeckle": "Remove ink specks smaller than this many pixels.",
+    "outline_offset_in": "How far outside the subject the cut line runs.",
 }
+INT_FIELDS = ("shadow_radius", "clahe_grid", "sharpen_percent", "sharpen_threshold", "comic_levels",
+              "comic_smooth", "comic_line_block", "comic_line_weight", "comic_despeckle")
 
 
 class Tooltip:
@@ -69,8 +79,7 @@ class App:
         self.root = root
         self.materials = core.load_materials()
         self.files = []
-        self.src_cache = {}         # path -> loaded grayscale source
-        self.resized_cache = {}     # (path, size) -> resized grayscale
+        self.src_cache = {}         # (path, remove_bg) -> (grayscale source, alpha or None)
         self.views = {}             # view name -> PIL image for the current file
         self.gen = 0                # bumps on every change; stale results are dropped
         self.pending = None
@@ -200,10 +209,14 @@ class App:
         self.left = left
         basic = ttk.Frame(nb, padding=8)
         fine = ttk.Frame(nb, padding=8)
+        comic = ttk.Frame(nb, padding=8)
         nb.add(basic, text="Basic")
-        nb.add(fine, text="Fine-tune")
+        nb.add(fine, text="Photo tuning")
+        nb.add(comic, text="Comic tuning")
+        self.nb, self.fine_tab, self.comic_tab = nb, fine, comic
         self._build_basic(basic)
         self._build_fine(fine)
+        self._build_comic(comic)
 
         # --- preview
         bar = ttk.Frame(right)
@@ -239,6 +252,12 @@ class App:
     def _build_basic(self, f):
         f.columnconfigure(1, weight=1)
         r = 0
+        ttk.Label(f, text="Style").grid(row=r, column=0, sticky="w", pady=3)
+        sf = ttk.Frame(f)
+        sf.grid(row=r, column=1, columnspan=2, sticky="w")
+        ttk.Radiobutton(sf, text="Photo", value="photo", variable=self.vars["style"]).pack(side="left")
+        ttk.Radiobutton(sf, text="Comic", value="comic", variable=self.vars["style"]).pack(side="left", padx=10)
+        r += 1
         ttk.Label(f, text="Material").grid(row=r, column=0, sticky="w", pady=3)
         self.mat_combo = ttk.Combobox(f, textvariable=self.vars["material"], state="readonly",
                                       values=sorted(self.materials))
@@ -257,15 +276,28 @@ class App:
         self.dpi_lbl.grid(row=r, column=2, sticky="w")
         r += 1
         ttk.Label(f, text="Dither").grid(row=r, column=0, sticky="w", pady=3)
-        ttk.Combobox(f, textvariable=self.vars["dither"], values=core.DITHER_MODES,
-                     state="readonly", width=16).grid(row=r, column=1, columnspan=2, sticky="w")
+        self.dither_combo = ttk.Combobox(f, textvariable=self.vars["dither"], values=core.DITHER_MODES,
+                                         state="readonly", width=16)
+        self.dither_combo.grid(row=r, column=1, columnspan=2, sticky="w")
         r += 1
-        ttk.Label(f, text="stucki: most detail (acrylic, glass)\n"
-                          "floyd-steinberg: photos, portraits\n"
-                          "bayer: wood grain, geometric\n"
-                          "none: hard cutoff, no shading",
-                  style="Hint.TLabel", justify="left").grid(row=r, column=0, columnspan=3,
-                                                            sticky="w", pady=(0, 8))
+        self.dither_hint = ttk.Label(f, text="stucki: most detail (acrylic, glass)\n"
+                                             "floyd-steinberg: photos, portraits\n"
+                                             "bayer: wood grain, geometric\n"
+                                             "none: hard cutoff, no shading",
+                                     style="Hint.TLabel", justify="left")
+        self.dither_hint.grid(row=r, column=0, columnspan=3, sticky="w", pady=(0, 4))
+        r += 1
+        cb = ttk.Checkbutton(f, text="Remove background (AI, ~1-3 s per photo) ⓘ",
+                             variable=self.vars["remove_bg"])
+        cb.grid(row=r, column=0, columnspan=3, sticky="w")
+        Tooltip(cb, "Cuts out the main subject and makes the background blank,\n"
+                    "so the laser skips it. Also gives the cut outline a real silhouette.")
+        r += 1
+        ttk.Checkbutton(f, text="Also save cut outline (SVG)", variable=self.vars["outline"]).grid(
+            row=r, column=0, columnspan=3, sticky="w")
+        r += 1
+        r = self._slider(f, r, "outline_offset_in", 0, 0.5, 0.01, label="Outline offset (in)")
+        ttk.Separator(f).grid(row=r, column=0, columnspan=3, sticky="ew", pady=4)
         r += 1
         ttk.Separator(f).grid(row=r, column=0, columnspan=3, sticky="ew", pady=4)
         r += 1
@@ -281,6 +313,37 @@ class App:
         bf.grid(row=r, column=0, columnspan=3, sticky="w", pady=(10, 0))
         ttk.Button(bf, text="Reset to material", command=self.on_material).pack(side="left")
         ttk.Button(bf, text="Save as material…", command=self.save_as_material).pack(side="left", padx=4)
+        tc = ttk.Button(f, text="Make test card ⓘ", command=self.make_test_card)
+        tc.grid(row=r + 1, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        Tooltip(tc, "Saves a 3x3 grid of this image at different contrast (columns)\n"
+                    "and gamma (rows). Burn it on scrap, then type the numbers under\n"
+                    "the best tile into Contrast and Gamma.")
+
+    def _build_comic(self, f):
+        f.columnconfigure(1, weight=1)
+        r = 0
+        ttk.Label(f, text="Used when Style = Comic.", style="Hint.TLabel").grid(
+            row=r, column=0, columnspan=3, sticky="w", pady=(0, 4))
+        r += 1
+        ttk.Label(f, text="Tones", font=("", 9, "bold")).grid(row=r, column=0, columnspan=3, sticky="w")
+        r += 1
+        r = self._slider(f, r, "comic_levels", 2, 5, 1, label="Tone bands")
+        r = self._slider(f, r, "comic_smooth", 0, 10, 1, label="Flatten")
+        r = self._slider(f, r, "comic_dot_mm", 0.3, 3, 0.05, label="Dot spacing (mm)")
+        ttk.Label(f, text="Ink lines", font=("", 9, "bold")).grid(row=r, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        r += 1
+        r = self._slider(f, r, "comic_line_block", 3, 61, 2, label="Line scale")
+        r = self._slider(f, r, "comic_line_c", 0, 20, 0.5, label="Sensitivity")
+        r = self._slider(f, r, "comic_line_weight", 0, 4, 1, label="Thickness")
+        r = self._slider(f, r, "comic_despeckle", 0, 300, 5, label="Despeckle")
+        ttk.Label(f, text="Contrast, brightness, gamma, invert and mirror\n"
+                          "on the Basic tab apply to comic too. With Invert on,\n"
+                          "shading flips but ink lines stay engraved\n"
+                          "(a scratchboard look on slate or black acrylic).",
+                  style="Hint.TLabel", justify="left").grid(row=r, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        r += 1
+        ttk.Button(f, text="Reset comic to defaults", command=self.reset_comic).grid(
+            row=r, column=0, columnspan=3, sticky="w", pady=(10, 0))
 
     def _build_fine(self, f):
         f.columnconfigure(1, weight=1)
@@ -303,15 +366,17 @@ class App:
         ttk.Button(f, text="Reset fine-tune to defaults", command=self.reset_fine).grid(
             row=r, column=0, columnspan=3, sticky="w", pady=(10, 0))
 
-    def _slider(self, f, r, name, lo, hi, step):
+    def _slider(self, f, r, name, lo, hi, step, label=None):
         var = self.vars[name]
-        label = name.replace("_", " ").replace("clahe ", "").replace("sharpen ", "").replace("shadow ", "")
-        lbl = ttk.Label(f, text=label.capitalize() + (" ⓘ" if name in TIPS else ""))
+        if label is None:
+            label = name.replace("_", " ").replace("clahe ", "").replace("sharpen ", "").replace("shadow ", "")
+            label = label.capitalize()
+        lbl = ttk.Label(f, text=label + (" ⓘ" if name in TIPS else ""))
         lbl.grid(row=r, column=0, sticky="w", pady=3)
         shown = tk.StringVar()
 
         def snap(val):
-            v = round(round(float(val) / step) * step, 4)
+            v = round(lo + round((float(val) - lo) / step) * step, 4)
             if var.get() != v:
                 var.set(v)
 
@@ -349,9 +414,10 @@ class App:
             d = {k: v.get() for k, v in self.vars.items()}
             d["dpi"] = int(float(d["dpi"]))
             d["width_in"] = round(float(d["width_in"]), 3)
-            for k in ("shadow_radius", "clahe_grid", "sharpen_percent", "sharpen_threshold"):
+            for k in INT_FIELDS:
                 d[k] = int(round(d[k]))
             d["clahe_grid"] = max(1, d["clahe_grid"])
+            d["comic_levels"] = min(5, max(2, d["comic_levels"]))
             s = core.Settings.from_dict(d)
         except (tk.TclError, ValueError):
             return None
@@ -378,6 +444,30 @@ class App:
             self.vars[k].set(getattr(d, k))
         self.suspend_traces = False
         self.on_change()
+
+    def reset_comic(self):
+        d = core.Settings()
+        self.suspend_traces = True
+        for k in self.vars:
+            if k.startswith("comic_"):
+                self.vars[k].set(getattr(d, k))
+        self.suspend_traces = False
+        self.on_change()
+
+    def make_test_card(self):
+        path, s = self.current_file(), self.settings()
+        if path is None or s is None:
+            messagebox.showinfo("No image", "Select an image first. The card uses its center.")
+            return
+        self.set_status("Making test card…")
+        self.root.update_idletasks()
+        try:
+            out = core.save_test_card(path, self.out_dir.get(), s)
+        except Exception as e:
+            messagebox.showerror("Test card failed", str(e))
+            return
+        self.set_status(f"Saved {os.path.basename(out)}")
+        os.startfile(out)
 
     def save_as_material(self):
         s = self.settings()
@@ -473,11 +563,15 @@ class App:
         if s is None:
             return
         self.dpi_lbl.configure(text=f"{25.4 / s.dpi:.3f} mm line interval")
+        photo = s.style == "photo"
+        self.dither_combo.state(["!disabled"] if photo else ["disabled"])
+        self.dither_hint.configure(foreground="#666" if photo else "#bbb")
         path = self.current_file()
-        src = self.src_cache.get(path)
-        if src is None:
+        cached = self.src_cache.get((path, s.remove_bg))
+        if cached is None:
             self.height_lbl.configure(text="")
             return
+        src = cached[0]
         w, h = s.output_size(src.width, src.height)
         self.height_lbl.configure(text=f"→ {h / s.dpi:.2f} in tall")
 
@@ -493,29 +587,24 @@ class App:
         if s is None:
             return
         gen = self.gen
-        self.set_status("Updating preview…")
+        slow = s.remove_bg and (path, True) not in self.src_cache
+        self.set_status("Removing background…" if slow else "Updating preview…")
         self.worker.submit(self._preview_job, gen, path, s)
 
     def _preview_job(self, gen, path, s):
         try:
-            src = self.src_cache.get(path)
-            if src is None:
-                src = core.load_image(path)
+            key = (path, s.remove_bg)
+            cached = self.src_cache.get(key)
+            if cached is None:
+                cached = core.load_source(path, s.remove_bg)
                 if len(self.src_cache) >= 6:      # big photos are ~12 MB each in memory
                     self.src_cache.pop(next(iter(self.src_cache)))
-                self.src_cache[path] = src
-            key = (path, s.output_size(src.width, src.height))
-            resized = self.resized_cache.get(key)
-            if resized is None:
-                resized = core.resize_to_target(src, s)
-                self.resized_cache = {key: resized}    # keep only the latest
+                self.src_cache[key] = cached
             if gen != self.gen:
                 return
-            gray = core.adjust(resized, s)
-            if gen != self.gen:
-                return
-            result = core.dither(gray, s.dither)
-            self.results.put(("preview", gen, path, s, src, gray, result))
+            src, alpha = cached
+            gray, result, mask = core.render(src, alpha, s)
+            self.results.put(("preview", gen, path, s, src, gray, result, mask))
         except Exception as e:
             self.results.put(("error", gen, f"Could not process {os.path.basename(path)}:\n{e}"))
 
@@ -525,8 +614,9 @@ class App:
                 msg = self.results.get_nowait()
                 kind = msg[0]
                 if kind == "preview":
-                    _, gen, path, s, src, gray, result = msg
+                    _, gen, path, s, src, gray, result, mask = msg
                     if gen == self.gen:
+                        self.last_mask = mask
                         self.show_preview(path, s, src, gray, result)
                 elif kind == "error":
                     if msg[1] == self.gen:
@@ -611,11 +701,8 @@ class App:
             if last and last[0] == self.gen and last[1] == path:
                 # Preview is up to date: save exactly what's on screen, no reprocessing.
                 _, _, s, gray, result = last
-                os.makedirs(self.out_dir.get(), exist_ok=True)
-                out = os.path.join(self.out_dir.get(), core.output_filename(path, s))
-                core.save_engraving(result, out, s)
-                if self.comparison.get():
-                    core.save_comparison(gray, result, out)
+                out = core.save_outputs(path, self.out_dir.get(), s, gray, result,
+                                        self.last_mask, self.comparison.get())
             else:
                 out = core.process_file(path, self.out_dir.get(), s, self.comparison.get())
         except Exception as e:

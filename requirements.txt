@@ -5,3 +5,6 @@ numpy>=1.24.0
 # Optional but strongly recommended: makes Stucki dithering ~50x faster,
 # which is what keeps the live preview responsive.
 numba>=0.58
+# Optional: AI background removal ("Remove background" checkbox).
+# Downloads a ~170 MB model to %USERPROFILE%\.u2net the first time it's used.
+rembg>=2.0

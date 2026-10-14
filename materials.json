@@ -28,7 +28,7 @@
     "contrast": 1.5,
     "brightness": 0.9,
     "gamma": 0.9,
-    "invert": false,
+    "invert": true,
     "mirror": false,
     "look": ["#3a3d42", "#b9bcbf"]
   },
