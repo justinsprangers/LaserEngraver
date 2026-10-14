@@ -1,0 +1,7 @@
+# Install with:  python -m pip install -r requirements.txt   (Python 3.8+)
+Pillow>=10.0.0
+opencv-python>=4.8.0
+numpy>=1.24.0
+# Optional but strongly recommended: makes Stucki dithering ~50x faster,
+# which is what keeps the live preview responsive.
+numba>=0.58
