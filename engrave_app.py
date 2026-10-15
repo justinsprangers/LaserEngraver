@@ -143,11 +143,18 @@ class App:
         self.mode = tk.StringVar(value="photos")
         self.dc = design_ui.DesignController(self, Tooltip)   # Design mode (layout editor)
         self.dc.restore_state(state.get("design_state", {}))
+        # Sizes everything for the monitor the window is on x the UI size setting, and follows
+        # the window to monitors with different scaling.
+        self.scaler = ui_kit.init_scaling(root, state.get("ui_scale", 1.0))
+        self.ui_size = tk.StringVar(value=f"{round(self.scaler.user_scale * 100)}%")
         self._build()
         self._sync_straighten()
+        self.scaler.skip.add(str(self.info))      # its wrap width follows its own size
+        self.scaler.refresh()
+        self.scaler.listeners.append(self._after_rescale)
         root.update_idletasks()
         # Size the settings column to its contents (works at any Windows display scaling).
-        root.after(300, lambda: self.body.sashpos(0, self.left.winfo_reqwidth() + 8))
+        root.after(300, self._fit_sash)
         for f in state.get("files", []):
             if os.path.isfile(f):
                 self._add_file(f)
@@ -185,6 +192,14 @@ class App:
         kb = ttk.Button(top, text="⌨ Shortcuts", command=self.open_shortcuts)
         kb.pack(side="right", padx=(0, 6))
         Tooltip(kb, "See and change the keyboard shortcuts")
+        us = ttk.Combobox(top, textvariable=self.ui_size, state="readonly", width=5,
+                          values=[f"{round(v * 100)}%" for v in ui_kit.UI_SIZES])
+        us.pack(side="right", padx=(0, 10))
+        us.bind("<<ComboboxSelected>>", lambda e: self.set_ui_scale(int(self.ui_size.get()[:-1]) / 100))
+        Tooltip(us, "UI size: makes everything bigger or smaller (also Ctrl+= / Ctrl+-).\n"
+                    "The app also adjusts automatically when you move it to a monitor\n"
+                    "with different Windows scaling.")
+        ttk.Label(top, text="UI size", style="Hint.TLabel").pack(side="right", padx=(0, 4))
         ttk.Separator(top, orient="vertical").pack(side="right", fill="y", padx=10)
         ob = ttk.Button(top, text="Open", width=6, command=self.open_out)
         ob.pack(side="right", padx=(6, 0))
@@ -1146,7 +1161,7 @@ class App:
                 self.canvas.create_line(split_x, y0, split_x, y1, fill="#2563eb", width=1)
                 for text, anchor, dx in (("Original", "ne", -6), (self.view.get(), "nw", 6)):
                     self.canvas.create_text(split_x + dx, y0 + 6, text=text, anchor=anchor,
-                                            fill="#2563eb", font=("", 9, "bold"))
+                                            fill="#2563eb", font="AppBold")
         self.disp = (scale, ox, oy, self.view_factor.get(self.view.get(), 1.0))
         self.zoom_lbl.configure(text=f"{scale * 100:.0f}%")
         if self.view.get() == "Cut-out" and self.vars["remove_bg"].get():
@@ -1304,6 +1319,7 @@ class App:
             self.prefetch_cutouts()
         if on and not self.fixbar.winfo_ismapped():
             self.fixbar.pack(fill="x", pady=(0, 4), before=self.canvas_frame)
+            self.scaler.refresh(self.fixbar)
         elif not on and self.fixbar.winfo_ismapped():
             self.fixbar.pack_forget()
             self.tool.set("pan")
@@ -1363,7 +1379,29 @@ class App:
         self.key_actions = {k: a for a, k in keymap.items() if k}
 
     def open_shortcuts(self):
-        shortcuts.ShortcutsWindow(self.root, self.keymap, self.set_keymap)
+        w = shortcuts.ShortcutsWindow(self.root, self.keymap, self.set_keymap)
+        self.scaler.refresh(w.win)
+
+    # --- UI size / monitor scaling
+
+    def set_ui_scale(self, s):
+        s = min(max(s, ui_kit.UI_SIZES[0]), ui_kit.UI_SIZES[-1])
+        self.ui_size.set(f"{round(s * 100)}%")
+        self.scaler.set_user_scale(s)
+
+    def step_ui_scale(self, step):
+        sizes = ui_kit.UI_SIZES
+        cur = self.scaler.user_scale
+        i = min(range(len(sizes)), key=lambda k: abs(sizes[k] - cur))
+        self.set_ui_scale(sizes[min(len(sizes) - 1, max(0, i + step))])
+
+    def _after_rescale(self):
+        self._fit_sash()
+        self.request_redraw()
+
+    def _fit_sash(self):
+        self.root.update_idletasks()
+        self.body.sashpos(0, self.left.winfo_reqwidth() + ui_kit.px(8))
 
     def _on_key(self, e):
         key = shortcuts.from_event(e)
@@ -1406,6 +1444,10 @@ class App:
             self._set_space(True)
         elif action == "compare":
             self._toggle_compare()
+        elif action == "ui_bigger":
+            self.step_ui_scale(+1)
+        elif action == "ui_smaller":
+            self.step_ui_scale(-1)
         elif action == "zoom_fit":
             self.zoom_fit()
         elif action == "zoom_100":
@@ -1655,6 +1697,7 @@ class App:
                  "mode": self.mode.get(), "design_state": self.dc.state(),   # unsaved designs survive
                  "engrave_speed": self._num(self.engrave_speed, 150.0), "cut_speed": self._num(self.cut_speed, 15.0),
                  "shortcuts": {a: k for a, k in self.keymap.items() if k != shortcuts.DEFAULTS[a]},
+                 "ui_scale": self.scaler.user_scale,
                  **{f"{st}_preset": v.get() for st, v in self.preset_vars.items()}}
         if self.root.state() == "normal":
             state["geometry"] = self.root.geometry()
@@ -1735,11 +1778,7 @@ def selftest(report_path):
 def main():
     if len(sys.argv) == 3 and sys.argv[1] == "--selftest":
         sys.exit(selftest(sys.argv[2]))
-    try:
-        import ctypes
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)   # crisp text on high-DPI screens
-    except Exception:
-        pass
+    ui_kit.set_dpi_awareness()       # crisp on every monitor; ui_kit.Scaler handles the sizing
     root = tk.Tk()
     App(root)
     root.mainloop()

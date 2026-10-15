@@ -23,6 +23,7 @@ from PIL import Image, ImageOps
 import design as D
 import engrave_core as core
 from ui_kit import ScrollTab, section
+from ui_kit import px as ui_px   # (named so it can't clash with local x/y variables)
 
 HANDLE = 6            # half-size of the corner handles, screen px
 ROT_OFFSET = 28       # rotation handle distance above the box, screen px
@@ -249,6 +250,7 @@ class DesignController:
         self.stale = {"Layout": True, "Design": True}
         self.request_composite()
         self.nb.select(self.design_tab if not self.design["layers"] else self.layer_tab)
+        app.scaler.refresh()                       # widgets just packed with base sizes
 
     def leave(self):
         app = self.app
@@ -278,6 +280,7 @@ class DesignController:
         app.views.pop("Design", None)
         app.views.pop("Layout", None)
         self.update_title()
+        app.scaler.refresh()
         app.on_change()
 
     # ================================================================ helpers
@@ -450,6 +453,7 @@ class DesignController:
             r = self._check(f, r, "Filled", "fill")
             r = self._num(f, r, "Line width (mm)", "stroke_mm", 0.1, lo=0.1, hi=20)
             r = self._num(f, r, "Corner radius (in)", "corner_in", 0.05, lo=0, hi=10)
+        self.app.scaler.refresh(f)                 # new widgets: scale their spacing
 
     def _num(self, f, r, label, key, step, lo=-1000.0, hi=1000.0, integer=False):
         layer = self.sel_layer()
@@ -891,14 +895,16 @@ class DesignController:
         pts = [(ox + x * s, oy + y * s) for x, y in D.corners_px(layer, dpi)]
         c.create_polygon(*[v for p in pts for v in p], outline=ACCENT, fill="", width=2)
         for x, y in pts:
-            c.create_rectangle(x - HANDLE, y - HANDLE, x + HANDLE, y + HANDLE, fill="white", outline=ACCENT)
+            hs = ui_px(HANDLE)
+            c.create_rectangle(x - hs, y - hs, x + hs, y + hs, fill="white", outline=ACCENT)
         tmx, tmy = (pts[0][0] + pts[1][0]) / 2, (pts[0][1] + pts[1][1]) / 2
         cx, cy = sum(p[0] for p in pts) / 4, sum(p[1] for p in pts) / 4
         dx, dy = tmx - cx, tmy - cy
         n = math.hypot(dx, dy) or 1
-        rx, ry = tmx + dx / n * ROT_OFFSET, tmy + dy / n * ROT_OFFSET
+        rx, ry = tmx + dx / n * ui_px(ROT_OFFSET), tmy + dy / n * ui_px(ROT_OFFSET)
         c.create_line(tmx, tmy, rx, ry, fill=ACCENT)
-        c.create_oval(rx - HANDLE, ry - HANDLE, rx + HANDLE, ry + HANDLE, fill="white", outline=ACCENT)
+        hs = ui_px(HANDLE)
+        c.create_oval(rx - hs, ry - hs, rx + hs, ry + hs, fill="white", outline=ACCENT)
         self.handles = {"corners": pts, "rot": (rx, ry), "center": (cx, cy)}
 
     @staticmethod
@@ -959,13 +965,13 @@ class DesignController:
         base = None
         if layer:
             base = {"id": layer["id"], "x0": e.x, "y0": e.y, "layer": copy.deepcopy(layer)}
-            if h and math.hypot(e.x - h["rot"][0], e.y - h["rot"][1]) <= HANDLE + 3:
+            if h and math.hypot(e.x - h["rot"][0], e.y - h["rot"][1]) <= ui_px(HANDLE + 3):
                 cx, cy = h["center"]
                 self.drag = dict(base, mode="rotate", a0=math.atan2(e.y - cy, e.x - cx))
                 return
             if h:
                 for i, (x, y) in enumerate(h["corners"]):
-                    if abs(e.x - x) <= HANDLE + 3 and abs(e.y - y) <= HANDLE + 3:
+                    if abs(e.x - x) <= ui_px(HANDLE + 3) and abs(e.y - y) <= ui_px(HANDLE + 3):
                         self.drag = dict(base, mode="scale", corner=i)
                         return
         s, ox, oy, dpi = self._screen()
@@ -1007,7 +1013,7 @@ class DesignController:
             layer["x_in"], layer["y_in"] = start["x_in"] + dx, start["y_in"] + dy
             snaps = []
             if not e.state & 0x20000:                   # hold Alt to move without snapping
-                ddx, ddy, snaps = self._snap(layer, SNAP_PX / s / dpi)
+                ddx, ddy, snaps = self._snap(layer, ui_px(SNAP_PX) / s / dpi)
                 layer["x_in"] += ddx
                 layer["y_in"] += ddy
             self.drag["snap"] = snaps
@@ -1060,7 +1066,7 @@ class DesignController:
         if abs(start["rotation"] % 360) < 0.01 and not e.state & 0x20000:
             # Snap the moving edges (only for unrotated items, where edges are well defined).
             xs, ys = self._snap_targets(layer)
-            tol = SNAP_PX / s / dpi
+            tol = ui_px(SNAP_PX) / s / dpi
             best = {}
             for axis, p, c, fcur, targets in ((0, px, c0[0], fx, xs), (1, py, c0[1], fy, ys)):
                 if not c or (axis == 1 and line):
@@ -1102,12 +1108,12 @@ class DesignController:
             return
         cur, h = "arrow", self.handles
         if h:
-            if math.hypot(e.x - h["rot"][0], e.y - h["rot"][1]) <= HANDLE + 3:
+            if math.hypot(e.x - h["rot"][0], e.y - h["rot"][1]) <= ui_px(HANDLE + 3):
                 cur = "exchange"
             else:
                 cx, cy = h["center"]
                 for x, y in h["corners"]:
-                    if abs(e.x - x) <= HANDLE + 3 and abs(e.y - y) <= HANDLE + 3:
+                    if abs(e.x - x) <= ui_px(HANDLE + 3) and abs(e.y - y) <= ui_px(HANDLE + 3):
                         cur = "size_nw_se" if (x - cx) * (y - cy) > 0 else "size_ne_sw"
                         break
         if cur == "arrow":

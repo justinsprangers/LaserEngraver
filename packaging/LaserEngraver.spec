@@ -9,9 +9,7 @@ datas = [
     (os.path.join(ROOT, "README.md"), "."),
     (os.path.join(SPECPATH, "icon.ico"), "."),
 ]
-datas += collect_data_files("rembg")
-datas += collect_data_files("sv_ttk")        # Sun Valley theme (.tcl + images)
-hiddenimports = collect_submodules("rembg.sessions")
+datas += collect_data_files("rembg")hiddenimports = collect_submodules("rembg.sessions")
 
 a = Analysis(
     [os.path.join(ROOT, "engrave_app.py")],

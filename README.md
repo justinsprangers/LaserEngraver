@@ -85,6 +85,13 @@ end; cutting time is the total cut-line length at the cut speed. It ignores acce
 multiple passes, so real jobs usually take somewhat longer. In Design mode the engraving part
 updates when you look at the Design view.
 
+## Screen size and scaling
+
+The app sizes itself for the monitor it's on (Windows display scaling) and re-adjusts when you
+drag it to a monitor with different scaling. **UI size** (top right, 80-200%, also Ctrl+= /
+Ctrl+-) makes everything bigger or smaller on top of that, for example on a high-resolution
+screen that Windows runs at 100%. It's remembered between sessions.
+
 ## Keyboard shortcuts
 
 Click **⌨ Shortcuts** (top right) to see every shortcut. To change one, select it, click
@@ -319,7 +326,7 @@ Run `python engrave_core.py -h` for all options.
 | `design_ui.py` | Design mode screens: layers panel, Design/Layer tabs, drag handles, undo. |
 | `vectors.py` | Cut lines (shapes, letter outlines, SVG paths, traced outlines) and the SVG/DXF writers. |
 | `shortcuts.py` | Keyboard shortcut list, key matching, and the Shortcuts window. |
-| `ui_kit.py` | Look and shared widgets: theme (Sun Valley, `sv-ttk`), tooltips, pinned-tab scrolling pages. |
+| `ui_kit.py` | Look, DPI scaling and shared widgets: the theme, tooltips, pinned-tab scrolling pages. |
 | `materials.json` | Material profiles. |
 | `settings.json` | Remembers your last settings and file list (created automatically, not in git). |
 | `output/` | Default save folder (not in git). |

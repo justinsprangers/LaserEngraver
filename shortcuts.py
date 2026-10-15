@@ -17,6 +17,8 @@ ACTIONS = [
     ("brush_bigger", "Bigger brush", "]", "Background fix tools"),
     ("pan_hold", "Pan while held (drag with the mouse)", "Space", "View"),
     ("compare", "Compare before / after", "C", "View"),
+    ("ui_bigger", "Bigger UI (text, buttons, spacing)", "Ctrl+=", "View"),
+    ("ui_smaller", "Smaller UI", "Ctrl+-", "View"),
     ("zoom_fit", "Zoom to fit", "Ctrl+0", "View"),
     ("zoom_100", "Zoom to 100%", "Ctrl+1", "View"),
     ("undo", "Undo (fix stroke in Photos, last change in Design)", "Ctrl+Z", "Editing"),
@@ -83,8 +85,9 @@ class ShortcutsWindow:
         tree = self.tree = ttk.Treeview(frame, columns=("key",), height=20, selectmode="browse")
         tree.heading("#0", text="Action")
         tree.heading("key", text="Shortcut")
-        tree.column("#0", width=380)
-        tree.column("key", width=130, anchor="center")
+        from ui_kit import px
+        tree.column("#0", width=px(400))
+        tree.column("key", width=px(140), anchor="center")
         tree.pack(fill="both", expand=True)
         tree.bind("<Double-1>", lambda e: self.start_capture())
         self.groups = {}
