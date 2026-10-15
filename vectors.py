@@ -13,9 +13,7 @@ software that doesn't keep file positions (Trotec Ruby, xTool, LaserGRBL, LightB
 """
 
 import base64
-import io
 import math
-import os
 
 import cv2
 import numpy as np

@@ -93,7 +93,8 @@ updates when you look at the Design view.
 - **UI size:** 80-200%, also Ctrl+= / Ctrl+-. Makes everything bigger or smaller, for example
   on a high-resolution screen that Windows runs at 100%.
 
-Both are remembered between sessions. The app also sizes itself for the monitor it's on
+Both are remembered between sessions. Your settings and any unsaved design are autosaved every
+minute, so a crash or power cut loses at most a minute of work; they come back on the next start. The app also sizes itself for the monitor it's on
 (Windows display scaling) and re-adjusts when you drag it to a monitor with different scaling.
 
 The output folder (**Save to**, with **Change…** and **Open folder**) is at the bottom, above
@@ -327,7 +328,13 @@ Run `python engrave_core.py -h` for all options.
 | `build.bat` | Builds the installer. |
 | `packaging/` | Build recipe: `build.py`, PyInstaller `LaserEngraver.spec`, Inno Setup `installer.iss`, `icon.ico`. |
 | `dist/`, `build/`, `installer/` | Build outputs (not in git). |
-| `engrave_app.py` | The window (tkinter). |
+| `engrave_app.py` | The window (tkinter): layout, settings, files, preview pipeline, saving, autosave. |
+| `app_panels.py` | Settings tabs: sliders, presets, materials, crop & rotate, test card. |
+| `app_preview.py` | Preview canvas: drawing, zoom / pan, compare, mouse handling, brush outline. |
+| `app_fixtools.py` | Background-removal fix toolbar and tools, AI model choice. |
+| `app_keys.py` | Keyboard shortcut handling and UI size. |
+| `app_common.py` | Constants shared by the app files. |
+| `selftest.py` | Self-test the build runs on the finished exe. |
 | `engrave_core.py` | All image processing. Change the pipeline here. |
 | `design.py` | Design mode engine: layers, text/arc text/shapes/logos/SVG rendering, compositing, project files. |
 | `design_ui.py` | Design mode screens: layers panel, Design/Layer tabs, drag handles, undo. |

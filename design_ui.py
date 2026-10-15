@@ -65,7 +65,6 @@ class DesignController:
 
     def build(self, top, left_holder_before, nb, bottom_hide):
         """Creates (unpacked) widgets. Called once from App._build."""
-        app = self.app
         # --- project buttons (replace Add images / Add folder / Remove)
         self.toolbar = ttk.Frame(top)
         for text, cmd, tip in (("New", self.new_design, "Start a new, empty design"),
@@ -1154,7 +1153,6 @@ class DesignController:
     def new_design(self):
         if not self.confirm_discard():
             return
-        app = self.app
         mat = self.design.get("material", "wood")
         self.design = D.new_design(mat, self.design["canvas"]["width_in"], self.design["canvas"]["height_in"],
                                    self.design["dpi"])
