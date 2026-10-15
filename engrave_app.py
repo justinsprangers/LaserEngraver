@@ -29,7 +29,8 @@ DPI_CHOICES = ("254", "318", "423", "508")   # 0.10, 0.08, 0.06, 0.05 mm line in
 ZOOM_STEP = 1.12          # per mouse-wheel notch
 VIEWS = ("Original", "Cut-out", "Adjusted", "Engraving", "Material look")
 FIXES_FILE = os.path.join(core.DATA_DIR, "fixes.json")
-STROKE_COLORS = {"keep": "#22c55e", "remove": "#ef4444"}
+STROKE_COLORS = {"keep": "#22c55e", "remove": "#ef4444",            # smart (re-cuts the region)
+                 "paint_keep": "#38bdf8", "paint_remove": "#f59e0b"}  # plain brush (exact)
 DEBOUNCE_MS = 300
 
 TIPS = {
@@ -85,9 +86,9 @@ class App:
         self.materials = core.load_materials()
         self.files = []
         self.src_cache = {}         # path -> grayscale source (no background removal)
-        self.ai_cache = {}          # path -> (RGB, AI alpha)
-        self.refined = {}           # path -> (strokes key, grayscale on white, corrected alpha)
-        self.step_cache = {}        # path -> {stroke-prefix key: alpha} so one new stroke = one step
+        self.ai_cache = {}          # (path, model) -> (RGB, AI alpha)
+        self.refined = {}           # (path, model) -> (strokes key, grayscale on white, corrected alpha)
+        self.step_cache = {}        # (path, model) -> {stroke-prefix key: alpha}: one new stroke = one step
         self.prefetcher = ThreadPoolExecutor(max_workers=1)   # AI cut-outs for the rest of the list
         self.prefetched = set()
         self.fixes = self._load_fixes()   # path -> list of feedback strokes
@@ -248,29 +249,54 @@ class App:
         for v in VIEWS:
             ttk.Radiobutton(bar, text=v, value=v, variable=self.view,
                             command=self.redraw).pack(side="left", padx=(0, 8))
-        ttk.Button(bar, text="100%", width=5, command=self.zoom_actual).pack(side="right")
-        ttk.Button(bar, text="Fit", width=4, command=self.zoom_fit).pack(side="right", padx=4)
-        ttk.Button(bar, text="+", width=2, command=lambda: self.zoom_by(ZOOM_STEP ** 2)).pack(side="right")
-        self.zoom_lbl = ttk.Label(bar, text="", width=6, anchor="center")
-        self.zoom_lbl.pack(side="right")
-        ttk.Button(bar, text="−", width=2, command=lambda: self.zoom_by(ZOOM_STEP ** -2)).pack(side="right")
 
-        # Fix tools: shown only while Remove background is on.
+        # Fix tools: shown only while Remove background is on. Two rows: model + tools, then brush.
         self.fixbar = ttk.Frame(right)
-        ttk.Label(self.fixbar, text="Fix cut-out:").pack(side="left")
-        for label, val in (("Pan", "pan"), ("Keep ✚", "keep"), ("Remove ✖", "remove")):
-            ttk.Radiobutton(self.fixbar, text=label, value=val, variable=self.tool,
-                            command=self.on_tool).pack(side="left", padx=(6, 0))
-        ttk.Label(self.fixbar, text="Brush").pack(side="left", padx=(14, 4))
-        ttk.Scale(self.fixbar, from_=6, to=100, variable=self.brush, length=110).pack(side="left")
-        ttk.Button(self.fixbar, text="Undo", command=self.undo_stroke).pack(side="left", padx=(14, 4))
-        ttk.Button(self.fixbar, text="Clear fixes", command=self.clear_fixes).pack(side="left")
-        self.fix_hint = ttk.Label(self.fixbar, text="", style="Hint.TLabel")
+        row0 = ttk.Frame(self.fixbar)
+        row0.pack(fill="x")
+        ttk.Label(row0, text="AI model:").pack(side="left")
+        self.model_label = tk.StringVar()
+        mc = ttk.Combobox(row0, textvariable=self.model_label, state="readonly", width=28,
+                          values=[core.BG_MODELS[m][0] for m in core.BG_MODELS])
+        mc.pack(side="left", padx=(4, 0))
+        mc.bind("<<ComboboxSelected>>", lambda e: self.on_model())
+        Tooltip(mc, "Which AI makes the first cut. Try a few on a tricky photo and keep the best.\n"
+                    "Each model downloads once (to %USERPROFILE%\\.u2net) the first time you pick it.\n"
+                    "Your fix strokes stay and are re-applied on top of the new model's cut.")
+        self.model_note = ttk.Label(row0, text="", style="Hint.TLabel")
+        self.model_note.pack(side="left", padx=8)
+        row1 = ttk.Frame(self.fixbar)
+        row1.pack(fill="x", pady=(4, 0))
+        row2 = ttk.Frame(self.fixbar)
+        row2.pack(fill="x", pady=(4, 0))
+        tool_tips = {
+            "keep": "Smart keep: paint on part of the subject that was removed.\n"
+                    "It re-cuts the whole connected region (e.g. a missing arm).",
+            "remove": "Smart remove: paint on background that was kept.\n"
+                      "It re-cuts the whole connected region (e.g. a lamp post).",
+            "paint_keep": "Brush keep: adds exactly what you paint, nothing else.\n"
+                          "For touch-ups after the smart tools.",
+            "paint_remove": "Brush erase: removes exactly what you paint, nothing else.\n"
+                            "For touch-ups after the smart tools.",
+        }
+        # Row 1: pan + smart tools + undo/clear. Row 2: plain brushes + size + fix count.
+        for row, tools in ((row1, (("Pan", "pan"), ("Smart keep", "keep"), ("Smart remove", "remove"))),
+                           (row2, (("Brush keep", "paint_keep"), ("Brush erase", "paint_remove")))):
+            for label, val in tools:
+                rb = ttk.Radiobutton(row, text=label, value=val, variable=self.tool, command=self.on_tool)
+                rb.pack(side="left", padx=(0, 6))
+                if val in tool_tips:
+                    Tooltip(rb, tool_tips[val])
+        ttk.Button(row1, text="Undo", width=6, command=self.undo_stroke).pack(side="left", padx=(8, 4))
+        ttk.Button(row1, text="Clear fixes", width=10, command=self.clear_fixes).pack(side="left")
+        ttk.Label(row2, text="Size").pack(side="left", padx=(8, 0))
+        ttk.Scale(row2, from_=2, to=100, variable=self.brush, length=120).pack(side="left", padx=4)
+        self.fix_hint = ttk.Label(row2, text="", style="Hint.TLabel")
         self.fix_hint.pack(side="left", padx=10)
-        Tooltip(self.fix_hint, "Keep: paint on parts of the subject that were wrongly removed.\n"
-                               "Remove: paint on background that was wrongly kept.\n"
-                               "When you let go, it re-learns subject vs. background colors from\n"
-                               "your strokes and re-cuts the whole wrong region, not just the paint.\n"
+        Tooltip(self.fix_hint, "Smart keep / remove (green / red): paint on a mistake and it re-cuts\n"
+                               "the whole wrong region. Keep only adds, Remove only takes away.\n"
+                               "Brush keep / erase (blue / orange): changes exactly the painted pixels,\n"
+                               "for touch-ups. Strokes apply in order, so brush after smart tools.\n"
                                "Right-drag pans in any tool. Fixes are saved per image.")
 
         cf = ttk.Frame(right)
@@ -287,8 +313,19 @@ class App:
         self.canvas.bind("<MouseWheel>", self.on_wheel)
         self.canvas.bind("<Double-Button-3>", lambda e: self.zoom_fit())
 
-        self.info = ttk.Label(right, text="", anchor="w", wraplength=900)
-        self.info.pack(fill="x", pady=(4, 0))
+        # Under the preview: zoom controls on the right, output info on the left.
+        under = ttk.Frame(right)
+        under.pack(fill="x", pady=(4, 0))
+        zf = ttk.Frame(under)
+        zf.pack(side="right", anchor="n")
+        ttk.Button(zf, text="−", width=2, command=lambda: self.zoom_by(ZOOM_STEP ** -2)).pack(side="left")
+        self.zoom_lbl = ttk.Label(zf, text="", width=6, anchor="center")
+        self.zoom_lbl.pack(side="left")
+        ttk.Button(zf, text="+", width=2, command=lambda: self.zoom_by(ZOOM_STEP ** 2)).pack(side="left")
+        ttk.Button(zf, text="Fit", width=4, command=self.zoom_fit).pack(side="left", padx=4)
+        ttk.Button(zf, text="100%", width=5, command=self.zoom_actual).pack(side="left")
+        self.info = ttk.Label(under, text="", anchor="w", wraplength=600)
+        self.info.pack(side="left", fill="x", expand=True)
         self.info.bind("<Configure>", lambda e: self.info.configure(wraplength=max(200, e.width)))
 
     def _build_basic(self, f):
@@ -490,6 +527,8 @@ class App:
                 d[k] = int(round(d[k]))
             d["clahe_grid"] = max(1, d["clahe_grid"])
             d["comic_levels"] = min(5, max(2, d["comic_levels"]))
+            if d["bg_model"] not in core.BG_MODELS:
+                d["bg_model"] = core.DEFAULT_BG_MODEL
             s = core.Settings.from_dict(d)
         except (tk.TclError, ValueError):
             return None
@@ -738,7 +777,7 @@ class App:
         self.update_fixbar()
         self.update_preset_state()
         path = self.current_file()
-        src = self.src_cache.get(path) or (self.ai_cache.get(path) or (None,))[0]
+        src = self.src_cache.get(path) or (self.ai_cache.get((path, s.bg_model)) or (None,))[0]
         if src is None:
             self.height_lbl.configure(text="")
             return
@@ -758,11 +797,14 @@ class App:
             return
         gen = self.gen
         strokes = list(self.fixes.get(path, []))
+        key = (path, s.bg_model)
         if not s.remove_bg:
             msg = "Updating preview…"
-        elif path not in self.ai_cache:
+        elif not core.model_downloaded(s.bg_model):
+            msg = "Downloading the AI model (one-time, can take a few minutes)…"
+        elif key not in self.ai_cache:
             msg = "Removing background…"
-        elif self.refined.get(path, (None,))[0] != core.stroke_key(strokes):
+        elif self.refined.get(key, (None,))[0] != core.stroke_key(strokes):
             msg = "Re-evaluating cut-out from your fixes…"
         else:
             msg = "Updating preview…"
@@ -779,18 +821,19 @@ class App:
         try:
             cutout = None
             if s.remove_bg:
-                if path not in self.ai_cache:
-                    self._remember(self.ai_cache, path, core.ai_cutout(path), limit=4)
-                rgb, a0 = self.ai_cache[path]
+                ck = (path, s.bg_model)                      # caches are per image AND model
+                if ck not in self.ai_cache:
+                    self._remember(self.ai_cache, ck, core.ai_cutout(path, s.bg_model), limit=4)
+                rgb, a0 = self.ai_cache[ck]
                 key = core.stroke_key(strokes)
-                ref = self.refined.get(path)
+                ref = self.refined.get(ck)
                 if ref is None or ref[0] != key:
-                    steps = self.step_cache.setdefault(path, {})
+                    steps = self.step_cache.setdefault(ck, {})
                     if len(self.step_cache) > 4:            # only keep step results for a few images
-                        self.step_cache.pop(next(k for k in self.step_cache if k != path))
-                    alpha = core.refined_cutout(path, rgb, a0, strokes, steps)
+                        self.step_cache.pop(next(k for k in self.step_cache if k != ck))
+                    alpha = core.refined_cutout(path, rgb, a0, strokes, steps, s.bg_model)
                     ref = (key, core.compose_on_white(rgb, alpha), alpha)
-                    self._remember(self.refined, path, ref, limit=4)
+                    self._remember(self.refined, ck, ref, limit=4)
                 _, src, alpha = ref
                 cutout = self._cutout_view(rgb, alpha)
             else:
@@ -1006,22 +1049,49 @@ class App:
         background, so each is ready (from the disk cache) by the time you click it."""
         if not self.vars["remove_bg"].get():
             return
-        self.prefetcher.submit(core.warm_up)
-        self.prefetched.add(self.current_file())     # the preview itself handles the selected one
+        model = self.vars["bg_model"].get()
+        if model not in core.BG_MODELS:
+            return
+        if ("warm", model) not in self.prefetched:
+            self.prefetched.add(("warm", model))
+            self.prefetcher.submit(self._warm, model)
+        self.prefetched.add((self.current_file(), model))   # the preview handles the selected one
         for f in self.files:
-            if f not in self.prefetched:
-                self.prefetched.add(f)
-                self.prefetcher.submit(self._prefetch_one, f)
+            if (f, model) not in self.prefetched:
+                self.prefetched.add((f, model))
+                self.prefetcher.submit(self._prefetch_one, f, model)
 
     @staticmethod
-    def _prefetch_one(path):
+    def _warm(model):
         try:
-            core.ai_cutout(path)          # result lands in the disk cache
+            core.warm_up(model)
+        except Exception:
+            pass                          # e.g. no internet for a download; the preview reports it
+
+    @staticmethod
+    def _prefetch_one(path, model):
+        try:
+            core.ai_cutout(path, model)   # result lands in the disk cache
         except Exception:
             pass                          # the preview will report real errors
 
+    def on_model(self):
+        label = self.model_label.get()
+        model = next((m for m, v in core.BG_MODELS.items() if v[0] == label), core.DEFAULT_BG_MODEL)
+        self.vars["bg_model"].set(model)          # triggers the preview update
+        self.update_model_note()
+
+    def update_model_note(self):
+        model = self.vars["bg_model"].get()
+        label, size, speed = core.BG_MODELS.get(model, core.BG_MODELS[core.DEFAULT_BG_MODEL])
+        if self.model_label.get() != label:
+            self.model_label.set(label)
+        self.model_note.configure(text=f"{speed}" if core.model_downloaded(model)
+                                  else f"{speed}, {size} download on first use")
+
     def update_fixbar(self):
         on = self.vars["remove_bg"].get()
+        self.update_model_note()
         if on:
             self.prefetch_cutouts()
         if on and not self.fixbar.winfo_ismapped():
@@ -1030,7 +1100,7 @@ class App:
             self.fixbar.pack_forget()
             self.tool.set("pan")
         n = len(self.fixes.get(self.current_file(), []))
-        self.fix_hint.configure(text=f"{n} fix{'es' if n != 1 else ''} on this image ⓘ")
+        self.fix_hint.configure(text=f"{n} fix{'es' if n != 1 else ''} ⓘ")
         self.canvas.configure(cursor="fleur" if self.tool.get() == "pan" else "crosshair")
 
     def on_tool(self):
@@ -1209,7 +1279,7 @@ def selftest(report_path):
         t = time.time()
         try:
             s = core.Settings(width_in=2.0, **kw)
-            core.render(*core.load_source(path, s.remove_bg, strokes), s)
+            core.render(*core.load_source(path, s.remove_bg, strokes, s.bg_model), s)
             lines.append(f"OK    {label}  {time.time() - t:.1f} s")
         except Exception as e:
             ok = False

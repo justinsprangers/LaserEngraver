@@ -27,7 +27,7 @@ import sys
 import threading
 from dataclasses import dataclass, asdict, fields
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 
 # Where things live. Running from source, everything is in this folder. As an installed app
 # (PyInstaller sets sys.frozen), the program folder is read-only, so user data goes to
@@ -80,6 +80,7 @@ class Settings:
     dpi: int = 254
     dither: str = "stucki"
     remove_bg: bool = False
+    bg_model: str = "u2net"        # one of BG_MODELS
     # Material profile (filled from materials.json, then adjustable)
     contrast: float = 1.4
     brightness: float = 1.0
@@ -253,24 +254,49 @@ def load_image(path):
     return img.convert("L")
 
 
-_rembg_session = None
+_rembg_sessions = {}
 _rembg_lock = threading.Lock()
+
+# Background-removal AI models (rembg names). Each is a one-time download to %USERPROFILE%\.u2net.
+BG_MODELS = {                  # name -> (menu label, download size, speed note)
+    # Speeds measured on this PC's CPU (16 threads); portrait not measured.
+    "u2net":                 ("General (u2net)", "170 MB", "~0.5 s/photo"),
+    "u2net_human_seg":       ("People only (u2net human)", "170 MB", "~0.5 s/photo, people only"),
+    "isnet-general-use":     ("Sharper edges (IS-Net)", "180 MB", "~1 s/photo"),
+    "birefnet-general-lite": ("Best quality, lite (BiRefNet)", "220 MB", "~7-17 s/photo"),
+    "birefnet-portrait":     ("Best portraits (BiRefNet)", "970 MB", "slowest, likely 30 s+/photo"),
+}
+DEFAULT_BG_MODEL = "u2net"
+
+# The model downloader prints a progress bar; the installed app has no console to print to.
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w")
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w")
+
+
+def model_path(model):
+    home = os.environ.get("U2NET_HOME", os.path.join(os.path.expanduser("~"), ".u2net"))
+    return os.path.join(home, f"{model}.onnx")
+
+
+def model_downloaded(model):
+    return os.path.exists(model_path(model))
 
 # Cut-out results are cached on disk, keyed by file path + modified time (+ strokes), so
 # nothing is recomputed when you reopen an image, Process all, or make a test card.
 CACHE_DIR = os.path.join(DATA_DIR, "cutout_cache")
-CACHE_VERSION = "2"           # bump when the cut-out algorithm changes, to ignore old results
+CACHE_VERSION = "3"           # bump when the cut-out algorithm changes, to ignore old results
 CACHE_LIMIT = 300             # newest files kept
 
 
-def warm_up():
-    """Loads the AI model (~4 s: library import + model load). Call early, in a background thread."""
-    global _rembg_session
+def warm_up(model=DEFAULT_BG_MODEL):
+    """Loads an AI model (~4 s; downloads it first if needed). Call early, in a background thread."""
     with _rembg_lock:
-        if _rembg_session is None:
+        if model not in _rembg_sessions:
             from rembg import new_session      # imported here: heavy, and only needed for this
-            _rembg_session = new_session("u2net")
-    return _rembg_session
+            _rembg_sessions[model] = new_session(model)
+    return _rembg_sessions[model]
 
 
 def _cache_file(path, tag):
@@ -303,15 +329,15 @@ def _write_mask(f, mask):
         pass                                   # caching is optional
 
 
-def ai_cutout(path):
-    """AI subject cut-out (u2net via rembg). Returns (RGB image, alpha mask). ~1 s per photo."""
+def ai_cutout(path, model=DEFAULT_BG_MODEL):
+    """AI subject cut-out via rembg. Returns (RGB image, alpha mask). ~1 s per photo for u2net."""
     img = ImageOps.exif_transpose(Image.open(path)).convert("RGB")
-    f = _cache_file(path, "ai")
+    f = _cache_file(path, f"ai-{model}")
     hit = _read_mask(f, img.size)
     if hit is not None:
         return img, hit
     from rembg import remove
-    alpha = remove(img, session=warm_up()).split()[-1]
+    alpha = remove(img, session=warm_up(model)).split()[-1]
     _write_mask(f, alpha)
     return img, alpha
 
@@ -327,11 +353,16 @@ def compose_on_white(rgb, alpha):
 # GrabCut fits Gaussian color models for subject vs. background (seeded by the AI's guess
 # plus your strokes) and solves a graph cut. Only wrong regions you touched are changed.
 
+# Stroke kinds. "keep"/"remove" are smart (re-cut the surrounding region with GrabCut);
+# "paint_keep"/"paint_remove" are a plain brush: exactly the painted pixels, nothing else.
+KEEP_KINDS = ("keep", "paint_keep")
+
+
 def _rasterize(strokes, shape, scale=1.0):
     """Masks (keep, remove) with the strokes painted in, at the given scale."""
     keep, remove = np.zeros(shape, np.uint8), np.zeros(shape, np.uint8)
     for kind, radius, pts in strokes:
-        target = keep if kind == "keep" else remove
+        target = keep if kind in KEEP_KINDS else remove
         r = max(1, int(round(radius * scale)))
         p = np.round(np.array(pts, np.float32) * scale).astype(np.int32)
         if len(p) == 1:
@@ -371,9 +402,29 @@ def refine_alpha(rgb, alpha, strokes, cache=None):
     return cur
 
 
+def _paint_stroke(alpha, stroke):
+    """Plain brush: sets exactly the painted pixels (with a 1 px anti-aliased edge)."""
+    kind, radius, pts = stroke
+    A = np.array(alpha).astype(np.float32) / 255
+    m = np.zeros(A.shape, np.uint8)
+    r = max(1, int(round(radius)))
+    p = np.round(np.array(pts, np.float32) * 16).astype(np.int32)     # 4 fractional bits
+    if len(p) == 1:
+        cv2.circle(m, tuple(int(v) for v in p[0]), r * 16, 255, -1, cv2.LINE_AA, shift=4)
+    else:
+        cv2.polylines(m, [p.reshape(-1, 1, 2)], False, 255, 2 * r, cv2.LINE_AA, shift=4)
+        for q in (p[0], p[-1]):
+            cv2.circle(m, tuple(int(v) for v in q), r * 16, 255, -1, cv2.LINE_AA, shift=4)
+    m = m.astype(np.float32) / 255
+    A = np.maximum(A, m) if kind in KEEP_KINDS else np.minimum(A, 1 - m)
+    return Image.fromarray(np.round(A * 255).astype(np.uint8))
+
+
 def _apply_stroke(rgb, alpha, strokes, max_side=400, iterations=4):
     """Applies the last stroke in `strokes` to `alpha` (earlier strokes stay as fixed labels)."""
     kind, radius, pts = strokes[-1]
+    if kind.startswith("paint_"):
+        return _paint_stroke(alpha, strokes[-1])
     adding = kind == "keep"
     W, H = rgb.size
     k = min(1.0, max_side / max(W, H))
@@ -392,7 +443,8 @@ def _apply_stroke(rgb, alpha, strokes, max_side=400, iterations=4):
         mask[region] = cv2.GC_PR_FGD if adding else cv2.GC_PR_BGD
     for st in strokes:                         # all strokes are firm labels; later ones win
         sk, sr = _rasterize([st], (h, w), k)
-        mask[sk if st[0] == "keep" else sr] = cv2.GC_FGD if st[0] == "keep" else cv2.GC_BGD
+        is_keep = st[0] in KEEP_KINDS
+        mask[sk if is_keep else sr] = cv2.GC_FGD if is_keep else cv2.GC_BGD
 
     has_fg = ((mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD)).any()
     has_bg = ((mask == cv2.GC_BGD) | (mask == cv2.GC_PR_BGD)).any()
@@ -464,11 +516,11 @@ def _guided_filter(guide, src, r, eps):
     return box(a) * guide + box(b)
 
 
-def refined_cutout(path, rgb, alpha, strokes, cache=None):
+def refined_cutout(path, rgb, alpha, strokes, cache=None, model=DEFAULT_BG_MODEL):
     """refine_alpha() with a disk cache, so Save / Process all / test card reuse the preview's work."""
     if not strokes:
         return alpha
-    f = _cache_file(path, "fix_" + stroke_key(strokes)[:20])
+    f = _cache_file(path, f"fix-{model}-" + stroke_key(strokes)[:20])
     hit = _read_mask(f, rgb.size)
     if hit is not None:
         return hit
@@ -477,17 +529,17 @@ def refined_cutout(path, rgb, alpha, strokes, cache=None):
     return alpha
 
 
-def remove_background(path, strokes=None):
+def remove_background(path, strokes=None, model=DEFAULT_BG_MODEL):
     """(grayscale on white, alpha mask), with feedback strokes applied if given."""
-    rgb, alpha = ai_cutout(path)
-    alpha = refined_cutout(path, rgb, alpha, strokes)
+    rgb, alpha = ai_cutout(path, model)
+    alpha = refined_cutout(path, rgb, alpha, strokes, model=model)
     return compose_on_white(rgb, alpha), alpha
 
 
-def load_source(path, remove_bg=False, strokes=None):
+def load_source(path, remove_bg=False, strokes=None, model=DEFAULT_BG_MODEL):
     """(grayscale, alpha or None). alpha marks the subject when the background was removed."""
     if remove_bg:
-        return remove_background(path, strokes)
+        return remove_background(path, strokes, model)
     return load_image(path), None
 
 
@@ -799,7 +851,7 @@ def save_outputs(path, out_dir, s, gray, result, mask, comparison=False):
 
 def process_file(path, out_dir, s, comparison=False, strokes=None):
     """Runs the full pipeline on one file and returns the output path."""
-    src, alpha = load_source(path, s.remove_bg, strokes)
+    src, alpha = load_source(path, s.remove_bg, strokes, s.bg_model)
     gray, result, mask = render(src, alpha, s)
     return save_outputs(path, out_dir, s, gray, result, mask, comparison)
 
@@ -861,7 +913,7 @@ def test_card(src, alpha, s, tile_in=1.0):
 
 
 def save_test_card(path, out_dir, s, strokes=None):
-    src, alpha = load_source(path, s.remove_bg, strokes)
+    src, alpha = load_source(path, s.remove_bg, strokes, s.bg_model)
     card = test_card(src, alpha, s)
     os.makedirs(out_dir, exist_ok=True)
     base = os.path.splitext(os.path.basename(path))[0]
@@ -887,7 +939,9 @@ if __name__ == "__main__":
     ap.add_argument("--width", type=float, default=6.0, help="engraving width in inches")
     ap.add_argument("--dpi", type=int, default=254)
     ap.add_argument("--dither", default="stucki", choices=DITHER_MODES)
-    ap.add_argument("--remove-bg", action="store_true", help="AI background removal (slow)")
+    ap.add_argument("--remove-bg", action="store_true", help="AI background removal")
+    ap.add_argument("--bg-model", default=DEFAULT_BG_MODEL, choices=list(BG_MODELS),
+                    help="AI model for background removal (downloads once)")
     ap.add_argument("--outline", action="store_true", help="also save a cut-outline SVG")
     ap.add_argument("--outline-offset", type=float, default=0.1, help="inches outside the subject")
     ap.add_argument("--test-card", action="store_true", help="save a contrast/gamma test card instead")
@@ -896,7 +950,7 @@ if __name__ == "__main__":
     a = ap.parse_args()
 
     s = Settings(style=a.style, material=a.material, width_in=a.width, dpi=a.dpi, dither=a.dither,
-                 remove_bg=a.remove_bg, outline=a.outline, outline_offset_in=a.outline_offset)
+                 remove_bg=a.remove_bg, bg_model=a.bg_model, outline=a.outline, outline_offset_in=a.outline_offset)
     s.apply_material(materials)
     files = []
     for p in a.inputs:

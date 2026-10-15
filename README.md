@@ -83,19 +83,38 @@ the engraving needs, meaning it will be upscaled and lose some sharpness.
 
 ## Fixing the background removal
 
-When **Remove background** is on, a *Fix cut-out* toolbar appears above the preview, along with
-the **Cut-out** view: your photo in color, with removed areas tinted red.
+When **Remove background** is on, a toolbar appears above the preview, along with the
+**Cut-out** view: your photo in color, with removed areas tinted red.
 
-1. Pick **Keep ✚** and paint over parts of the subject that were wrongly removed, or pick
-   **Remove ✖** and paint over background that was wrongly kept. (Choosing a tool switches to
-   the Cut-out view.)
-2. Let go of the mouse. It re-evaluates in a second or two.
-3. Repeat where needed. **Undo** removes the last stroke; **Clear fixes** removes them all.
-   Right-drag pans in any tool; the mouse wheel zooms.
+**AI model**: which AI makes the first cut. Each downloads once (to `%USERPROFILE%\.u2net`) the
+first time you pick it. Your fixes stay and are re-applied on top of whichever model you choose.
+
+| Model | Size | Speed (this PC) | Best for |
+|---|---|---|---|
+| General (u2net) | 170 MB | ~0.5 s | Anything; the original |
+| People only (u2net human) | 170 MB | ~0.5 s | Photos of people; poor on pets and objects |
+| Sharper edges (IS-Net) | 180 MB | ~1 s | General, finer edges |
+| Best quality, lite (BiRefNet) | 220 MB | ~7-17 s | Tricky photos where the others fail |
+| Best portraits (BiRefNet) | 970 MB | slowest (not measured) | Hair and portrait detail |
+
+**Fix tools**:
+
+| Tool | Color | What it does |
+|---|---|---|
+| **Smart keep** | green | Paint on part of the subject that was removed; re-cuts the whole connected region. |
+| **Smart remove** | red | Paint on background that was kept; re-cuts the whole connected region. |
+| **Brush keep** | blue | Adds exactly the painted pixels, nothing else. For touch-ups. |
+| **Brush erase** | orange | Removes exactly the painted pixels, nothing else. For touch-ups. |
+
+1. Pick a tool and paint over the mistake. (Choosing a tool switches to the Cut-out view.)
+2. Let go of the mouse. Smart tools re-evaluate in about a second; brushes are instant.
+3. Repeat where needed. Typical flow: smart tools for big mistakes, then brushes for the last
+   details. **Undo** removes the last stroke; **Clear fixes** removes them all. **Size** sets the
+   brush size. Right-drag pans in any tool; the mouse wheel zooms.
 
 Rules you can rely on:
-- **Keep only ever adds** to the subject, and **Remove only ever takes away**, and only in the
-  region the stroke touches.
+- **Keep tools only ever add** to the subject, and **Remove/erase tools only ever take away**;
+  smart tools act only in the region the stroke touches, brushes only on the painted pixels.
 - Each stroke is applied on top of the previous result, so a new stroke never changes an earlier fix.
 - Painted pixels always get exactly what you painted.
 
