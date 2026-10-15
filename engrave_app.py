@@ -167,6 +167,7 @@ class App:
             self.dc.enter()
         self.on_change()
         self.root.after(50, self._poll)
+        self.root.after(self.AUTOSAVE_MS, self._autosave)
 
     # ------------------------------------------------------------------ layout
 
@@ -1704,7 +1705,23 @@ class App:
         except (OSError, ValueError):
             return {}
 
+    AUTOSAVE_MS = 60_000
+
+    def _autosave(self):
+        """Saves the app state (including an unsaved design) every minute, so a crash or power
+        cut loses at most a minute of work. It's restored automatically on the next start."""
+        try:
+            self.save_state()
+        finally:
+            self.root.after(self.AUTOSAVE_MS, self._autosave)
+
     def on_close(self):
+        self.save_state()
+        self.root.destroy()
+
+    def save_state(self):
+        """Writes settings.json atomically (a crash mid-write can't corrupt it). Skips the write
+        when nothing changed."""
         # In Design mode the controls show the selected layer, so save the Photos-mode settings.
         s = (self.dc.photo_snapshot if self.dc.active else None) or self.settings()
         state = {"settings": (s or core.Settings()).to_dict(), "out_dir": self.out_dir.get(),
@@ -1717,13 +1734,18 @@ class App:
                  **{f"{st}_preset": v.get() for st, v in self.preset_vars.items()}}
         if self.root.state() == "normal":
             state["geometry"] = self.root.geometry()
+        text = json.dumps(state, indent=2)
+        if text == getattr(self, "_saved_state", None):
+            return
         try:
             os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
-            with open(STATE_FILE, "w", encoding="utf-8") as f:
-                json.dump(state, f, indent=2)
+            tmp = STATE_FILE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(text)
+            os.replace(tmp, STATE_FILE)
+            self._saved_state = text
         except OSError:
             pass
-        self.root.destroy()
 
     @staticmethod
     def _num(var, default):
