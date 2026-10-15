@@ -22,12 +22,13 @@ Can also be run from the command line:
 
 import hashlib
 import json
+import math
 import os
 import sys
 import threading
 from dataclasses import dataclass, asdict, fields
 
-VERSION = "1.6.0"
+VERSION = "1.7.0"
 
 # Where things live. Running from source, everything is in this folder. As an installed app
 # (PyInstaller sets sys.frozen), the program folder is read-only, so user data goes to
@@ -98,6 +99,14 @@ class Settings:
     sharpen_radius: float = 2
     sharpen_percent: int = 150
     sharpen_threshold: int = 3
+    # Size by width (default) or height; crop / rotate before processing (Photos mode)
+    size_by: str = "width"
+    height_in: float = 4.0
+    rotate: float = 0.0            # degrees clockwise; non-90° angles auto-crop the empty corners
+    crop_l: float = 0.0            # fraction removed from each edge (0 = none)
+    crop_t: float = 0.0
+    crop_r: float = 0.0
+    crop_b: float = 0.0
     # Comic
     comic_levels: int = 4          # tone bands, 2-5 (darkest = solid, lightest = blank)
     comic_smooth: int = 4          # bilateral passes; more = flatter, more cartoon-like
@@ -125,10 +134,19 @@ class Settings:
                 setattr(self, key, p[key])
 
     def output_size(self, src_w, src_h):
-        """Pixel size of the output, same rounding as the original script."""
+        """Pixel size of the output, same rounding as the original script (by width), or set
+        by height instead."""
+        if self.size_by == "height":
+            h = int(self.height_in * self.dpi)
+            return int(h * (src_w / src_h)), h
         w = int(self.width_in * self.dpi)
         h = int(w * (src_h / src_w))
         return w, h
+
+    def size_in(self, src_w, src_h):
+        """(width, height) of the engraving in inches."""
+        w, h = self.output_size(src_w, src_h)
+        return w / self.dpi, h / self.dpi
 
     def mm_to_px(self, mm):
         return mm * self.dpi / 25.4
@@ -834,7 +852,83 @@ def outline_svg(mask, s):
 def output_filename(path, s):
     base = os.path.splitext(os.path.basename(path))[0]
     kind = "comic" if s.style == "comic" else s.dither
-    return f"{base}_{s.material}_{s.width_in}in_{s.dpi}dpi_{kind}.png"
+    size = f"{s.width_in}in" if s.size_by != "height" else f"{s.height_in}in-tall"
+    return f"{base}_{s.material}_{size}_{s.dpi}dpi_{kind}.png"
+
+
+# ------------------------------------------------------------------------------
+# Crop / rotate (Photos mode), and job-time estimates
+# ------------------------------------------------------------------------------
+
+def _inscribed(w, h, angle):
+    """Largest axis-aligned rectangle inside a w x h rectangle rotated by `angle` radians."""
+    if w <= 0 or h <= 0:
+        return 0, 0
+    long_side, short_side = (w, h) if w >= h else (h, w)
+    sa, ca = abs(math.sin(angle)), abs(math.cos(angle))
+    if short_side <= 2 * sa * ca * long_side or abs(sa - ca) < 1e-10:
+        x = 0.5 * short_side
+        wr, hr = (x / sa, x / ca) if w >= h else (x / ca, x / sa)
+    else:
+        cos_2a = ca * ca - sa * sa
+        wr, hr = (w * ca - h * sa) / cos_2a, (h * ca - w * sa) / cos_2a
+    return wr, hr
+
+
+def prepare(src, alpha, s):
+    """Applies the Photos-mode rotate and crop to the source (and its cut-out mask)."""
+    rot = s.rotate % 360
+    if rot:
+        quarter = {90: Image.Transpose.ROTATE_270, 180: Image.Transpose.ROTATE_180,
+                   270: Image.Transpose.ROTATE_90}
+        if rot in quarter:
+            src = src.transpose(quarter[rot])
+            alpha = alpha.transpose(quarter[rot]) if alpha is not None else None
+        else:
+            w, h = src.size
+            src = src.rotate(-rot, resample=Image.Resampling.BICUBIC, expand=True, fillcolor=255)
+            alpha = alpha.rotate(-rot, resample=Image.Resampling.BICUBIC, expand=True,
+                                 fillcolor=0) if alpha is not None else None
+            # Straightening: crop away the empty corners the rotation creates.
+            wr, hr = _inscribed(w, h, math.radians(rot))
+            box = (round((src.width - wr) / 2), round((src.height - hr) / 2),
+                   round((src.width + wr) / 2), round((src.height + hr) / 2))
+            src = src.crop(box)
+            alpha = alpha.crop(box) if alpha is not None else None
+    if s.crop_l or s.crop_t or s.crop_r or s.crop_b:
+        W, H = src.size
+        box = (round(s.crop_l * W), round(s.crop_t * H), round((1 - s.crop_r) * W), round((1 - s.crop_b) * H))
+        if box[2] - box[0] >= 8 and box[3] - box[1] >= 8:
+            src = src.crop(box)
+            alpha = alpha.crop(box) if alpha is not None else None
+    return src, alpha
+
+
+def raster_stats(burn):
+    """(total scanned px, rows with burn) for a burn mask (True = laser fires). Each row is
+    scanned from its first to its last burn pixel, like most laser software does."""
+    rows = np.flatnonzero(burn.any(axis=1))
+    if not len(rows):
+        return 0, 0
+    sub = burn[rows]
+    first = sub.argmax(axis=1)
+    last = sub.shape[1] - 1 - sub[:, ::-1].argmax(axis=1)
+    return int((last - first + 1).sum()), int(len(rows))
+
+
+def estimate_seconds(stats, dpi, speed_mm_s, overscan_mm=2.5):
+    """Rough raster engraving time: scanned length plus overscan per line, at constant speed
+    (ignores acceleration, so real jobs usually take somewhat longer)."""
+    total_px, rows = stats
+    if not rows or speed_mm_s <= 0:
+        return 0.0
+    return (total_px * 25.4 / dpi + rows * 2 * overscan_mm) / speed_mm_s
+
+
+def format_duration(seconds):
+    m, s = divmod(int(round(seconds)), 60)
+    h, m = divmod(m, 60)
+    return f"{h} h {m:02d} min" if h else (f"{m} min {s:02d} s" if m else f"{s} s")
 
 
 def save_engraving(dithered, out_path, s):
@@ -865,7 +959,7 @@ def save_outputs(path, out_dir, s, gray, result, mask, comparison=False):
 
 def process_file(path, out_dir, s, comparison=False, strokes=None):
     """Runs the full pipeline on one file and returns the output path."""
-    src, alpha = load_source(path, s.remove_bg, strokes, s.bg_model)
+    src, alpha = prepare(*load_source(path, s.remove_bg, strokes, s.bg_model), s)
     gray, result, mask = render(src, alpha, s)
     return save_outputs(path, out_dir, s, gray, result, mask, comparison)
 
@@ -897,7 +991,7 @@ def test_card(src, alpha, s, tile_in=1.0):
     H = head_h + 3 * cell_h + gap
 
     # Center crop covering one tile's worth of the real engraving, so detail is at true scale.
-    side = int(min(src.width * tile_in / s.width_in, src.width, src.height))
+    side = int(min(src.width * tile_in / s.size_in(src.width, src.height)[0], src.width, src.height))
     box = ((src.width - side) // 2, (src.height - side) // 2)
     box = box + (box[0] + side, box[1] + side)
     crop_src = src.crop(box)
@@ -927,7 +1021,7 @@ def test_card(src, alpha, s, tile_in=1.0):
 
 
 def save_test_card(path, out_dir, s, strokes=None):
-    src, alpha = load_source(path, s.remove_bg, strokes, s.bg_model)
+    src, alpha = prepare(*load_source(path, s.remove_bg, strokes, s.bg_model), s)
     card = test_card(src, alpha, s)
     os.makedirs(out_dir, exist_ok=True)
     base = os.path.splitext(os.path.basename(path))[0]

@@ -237,10 +237,14 @@ class DesignController:
         app = self.app
         self.active = True
         self.photo_snapshot = app.settings()
+        app.set_estimate(None, self.design["dpi"], 0.0)   # the estimate now covers the design
         app.file_toolbar.pack_forget()
         self.toolbar.pack(side="left", after=app.mode_frame)
         app.images_frame.pack_forget()
         self.layers_frame.pack(fill="both", expand=False, before=self.left_before)
+        app.photo_only.grid_remove()               # layers have their own crop / rotation / size
+        for w in app.size_rows[2:]:                # (height row: layers are sized by width)
+            w.grid_remove()
         self.nb.insert(0, self.layer_tab, text="Layer")
         self.nb.insert(0, self.design_tab, text="Design")
         for w in self.bottom_hide:
@@ -264,10 +268,14 @@ class DesignController:
     def leave(self):
         app = self.app
         self.active = False
+        app.set_estimate(None, 0, 0.0)
         self.toolbar.pack_forget()
         app.file_toolbar.pack(side="left", after=app.mode_frame)
         self.layers_frame.pack_forget()
         app.images_frame.pack(fill="both", expand=False, before=self.left_before)
+        app.photo_only.grid()
+        for w in app.size_rows[2:]:
+            w.grid()
         self.nb.forget(self.design_tab)
         self.nb.forget(self.layer_tab)
         for tab in (app.basic_tab, app.fine_tab, app.comic_tab):
@@ -829,7 +837,8 @@ class DesignController:
                 view, fill = ImageOps.colorize(img, black=look[1], white=look[0]), float(burn.mean())
             cuts = D.all_cut_paths(snap, r, cover)            # red lines on the preview
             sizes = {l["id"]: (l["w_in"], l["h_in"]) for l in snap["layers"] if l["type"] in ("text", "arctext")}
-            self.app.results.put(("design", which, gen, view, sizes, fill, time.time() - t, cuts))
+            stats = core.raster_stats(burn) if which == "Design" else None   # for the time estimate
+            self.app.results.put(("design", which, gen, view, sizes, fill, time.time() - t, cuts, stats))
         except Exception as e:
             self.app.results.put(("design_error", which, gen, f"Couldn't render the design: {e}"))
 
@@ -840,11 +849,16 @@ class DesignController:
             if msg[2] == self.gens[msg[1]]:
                 app.info.configure(text=msg[3], style="Warn.TLabel")
             return
-        _, which, gen, view, sizes, fill, secs, cuts = msg
+        _, which, gen, view, sizes, fill, secs, cuts, stats = msg
         if gen != self.gens[which] or not self.active:
             return
         self.stale[which] = False
         self.cut_preview[which] = cuts
+        cut_mm = sum(math.dist(p[i], p[(i + 1) % len(p)]) if c or i + 1 < len(p) else 0
+                     for p, c in cuts for i in range(len(p))) * 25.4
+        if stats is None:                       # Layout view: keep the last engraving estimate
+            stats = app.estimate[0] if app.estimate else None
+        app.set_estimate(stats, self.design["dpi"], cut_mm)
         for lid, (w, h) in sizes.items():
             layer = self.layer_by_id(lid)
             if layer and not (self.drag and self.drag["id"] == lid and self.drag["mode"] == "scale"):

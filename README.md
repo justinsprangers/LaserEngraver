@@ -48,7 +48,10 @@ python engrave_app.py
 ## Using it
 
 1. **Add images…** or **Add folder…**. Click a file in the list to preview it.
-2. **Basic** tab: pick the style, material, width in inches, DPI, and dither mode (photo only).
+2. **Basic** tab: pick the style, material, size (set the **width** or the **height**; the other
+   follows the photo), DPI, and dither mode (photo only). **Crop & rotate** turns the photo in
+   90° steps, **Straighten** fixes a tilt (±15°, the empty corners are trimmed automatically),
+   and **Crop** trims a % from each edge.
    Choosing a material loads its contrast, brightness, gamma, invert, and mirror settings. You
    can then adjust them. Optional:
    - **Remove background**: AI cut-out of the main subject; the background is left blank.
@@ -72,6 +75,32 @@ python engrave_app.py
 
 The line under the preview shows output size. It turns orange when the photo has fewer pixels than
 the engraving needs, meaning it will be upscaled and lose some sharpness.
+
+**Compare (C)** splits the Adjusted / Engraving / Material look view: the original photo is on the
+left of the divider. Drag the divider.
+
+**Job time estimate** (bottom right): set your engrave and cut speeds in mm/s. Engraving time
+assumes each line is scanned from its first to its last dark pixel, plus 2.5 mm overscan at each
+end; cutting time is the total cut-line length at the cut speed. It ignores acceleration and
+multiple passes, so real jobs usually take somewhat longer. In Design mode the engraving part
+updates when you look at the Design view.
+
+## Keyboard shortcuts
+
+| Keys | Action |
+|---|---|
+| K / R | Smart keep / smart remove (with Remove background on) |
+| B / E | Brush keep / brush erase |
+| P or Esc | Pan tool |
+| [ / ] | Smaller / bigger brush (a circle under the cursor shows its size) |
+| Space + drag | Pan, in any tool or view |
+| C | Compare (before/after split) |
+| Ctrl+0 / Ctrl+1 | Zoom to fit / 100% |
+| Ctrl+Z | Undo the last fix stroke (Photos mode) |
+| Ctrl+S | Save engraving (Photos mode) / save project (Design mode) |
+| Design mode | Delete, Ctrl+Z / Ctrl+Y, Ctrl+D, arrow keys; see Design mode below |
+
+Shortcuts are ignored while you're typing in a field.
 
 ### Output files
 

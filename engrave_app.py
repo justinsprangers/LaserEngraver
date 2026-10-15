@@ -18,6 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
+import numpy as np
 from PIL import Image, ImageOps, ImageTk
 
 import design_ui
@@ -54,6 +55,7 @@ TIPS = {
     "comic_despeckle": "Remove ink specks smaller than this many pixels.",
     "outline_offset_in": "How far outside the subject the cut line runs.",
 }
+CROP_FIELDS = ("crop_l", "crop_t", "crop_r", "crop_b")   # fractions in Settings, % in the UI
 INT_FIELDS = ("shadow_radius", "clahe_grid", "sharpen_percent", "sharpen_threshold", "comic_levels",
               "comic_smooth", "comic_line_block", "comic_line_weight", "comic_despeckle")
 
@@ -122,9 +124,20 @@ class App:
         self._redraw_pending = False
         self._pan_from = None
         self._shown_path = None
+        self.last_src_size = {}     # path -> (w, h) of the photo after crop/rotate
+        self.estimate = None        # (raster stats, dpi, cut length mm) for the job-time estimate
+        self.compare = tk.BooleanVar(value=False)    # before/after split view
+        self.split = 0.5            # divider position (fraction of the image width)
+        self._split_drag = False
+        self._space = False         # Space held = pan
+        self._mouse = None          # last pointer position on the canvas (for the brush outline)
+        self.engrave_speed = tk.DoubleVar(value=state.get("engrave_speed", 150.0))
+        self.cut_speed = tk.DoubleVar(value=state.get("cut_speed", 15.0))
 
         self.vars = {}
         for name, value in s.to_dict().items():
+            if name in CROP_FIELDS:
+                value = round(value * 100, 2)          # crop is shown in percent
             if isinstance(value, bool):
                 v = tk.BooleanVar(value=value)
             elif isinstance(value, (int, float)) and name != "dpi":
@@ -150,6 +163,7 @@ class App:
         self.dc = design_ui.DesignController(self, Tooltip)   # Design mode (layout editor)
         self.dc.restore_state(state.get("design_state", {}))
         self._build()
+        self._sync_straighten()
         root.update_idletasks()
         # Size the settings column to its contents (works at any Windows display scaling).
         root.after(300, lambda: self.body.sashpos(0, self.left.winfo_reqwidth() + 8))
@@ -210,10 +224,25 @@ class App:
         self.comparison_cb = ttk.Checkbutton(bottom, text="Also save side-by-side preview JPG",
                                              variable=self.comparison)
         self.comparison_cb.pack(side="left", padx=8)
-        self.progress = ttk.Progressbar(bottom, length=180, mode="determinate")
+        self.progress = ttk.Progressbar(bottom, length=140, mode="determinate")
         self.progress.pack(side="right")
         self.status = ttk.Label(bottom, text="", style="Hint.TLabel")
         self.status.pack(side="right", padx=8)
+        # Job-time estimate (rough: constant speed, no acceleration).
+        est = ttk.Frame(bottom)
+        est.pack(side="right", padx=(8, 8))
+        ttk.Label(est, text="Speed mm/s: engrave").pack(side="left")
+        ttk.Spinbox(est, textvariable=self.engrave_speed, from_=1, to=5000, increment=10, width=5).pack(side="left", padx=2)
+        ttk.Label(est, text="cut").pack(side="left", padx=(4, 0))
+        ttk.Spinbox(est, textvariable=self.cut_speed, from_=0.5, to=500, increment=1, width=4).pack(side="left", padx=2)
+        self.estimate_lbl = ttk.Label(est, text="", width=26)
+        self.estimate_lbl.pack(side="left", padx=(6, 0))
+        Tooltip(self.estimate_lbl, "Rough job time. Engraving: each line is scanned from its first to its\n"
+                                   "last dark pixel, plus 2.5 mm overscan at each end, at the engrave\n"
+                                   "speed. Cutting: total cut-line length at the cut speed. Ignores\n"
+                                   "acceleration and multiple passes, so real jobs usually take longer.")
+        for v in (self.engrave_speed, self.cut_speed):
+            v.trace_add("write", lambda *_: self.update_estimate())
 
         body = ttk.PanedWindow(self.root, orient="horizontal")
         body.pack(fill="both", expand=True, padx=8)
@@ -281,6 +310,10 @@ class App:
             rb = ttk.Radiobutton(bar, text=v, value=v, variable=self.view, command=self.on_view_change)
             rb.pack(side="left", padx=(0, 8))
             self.view_radios.append(rb)
+        self.compare_cb = ttk.Checkbutton(bar, text="Compare (C)", variable=self.compare, command=self.redraw)
+        self.compare_cb.pack(side="right")
+        Tooltip(self.compare_cb, "Before/after split on the Adjusted, Engraving and Material look views:\n"
+                                 "the original photo on the left of the divider. Drag the divider.")
 
         # Fix tools: shown only while Remove background is on. Two rows: model + tools, then brush.
         self.fixbar = ttk.Frame(right)
@@ -329,7 +362,8 @@ class App:
                                "the whole wrong region. Keep only adds, Remove only takes away.\n"
                                "Brush keep / erase (blue / orange): changes exactly the painted pixels,\n"
                                "for touch-ups. Strokes apply in order, so brush after smart tools.\n"
-                               "Right-drag pans in any tool. Fixes are saved per image.")
+                               "Right-drag pans in any tool. Fixes are saved per image.\n\n"
+                               "Shortcuts:\n" + self.SHORTCUTS_HELP)
 
         cf = ttk.Frame(right)
         cf.pack(fill="both", expand=True)
@@ -339,7 +373,9 @@ class App:
         self.canvas.bind("<ButtonPress-1>", self.on_press)
         self.canvas.bind("<B1-Motion>", self.on_drag)
         self.canvas.bind("<ButtonRelease-1>", self.on_release)
-        self.canvas.bind("<Motion>", lambda e: self._design_view() and self.dc.on_motion(e))
+        self.canvas.bind("<Motion>", self.on_motion)
+        self.canvas.bind("<Leave>", lambda e: (setattr(self, "_mouse", None), self.canvas.delete("brush")))
+        self.brush.trace_add("write", lambda *_: self._draw_brush())
         self.canvas.bind("<ButtonPress-3>", self.pan_start)
         self.canvas.bind("<B3-Motion>", self.pan_move)
         self.canvas.bind("<Configure>", lambda e: self.request_redraw())
@@ -362,6 +398,7 @@ class App:
         self.info.bind("<Configure>", lambda e: self.info.configure(wraplength=max(200, e.width)))
 
         self.dc.build(top, holder, nb, bottom_hide=[self.batch_btn, self.comparison_cb])
+        self._bind_shortcuts()
 
     def _build_basic(self, f):
         f.columnconfigure(1, weight=1)
@@ -377,12 +414,21 @@ class App:
                                       values=sorted(self.materials))
         self.mat_combo.grid(row=r, column=1, columnspan=2, sticky="ew")
         r += 1
-        ttk.Label(f, text="Width (in)").grid(row=r, column=0, sticky="w", pady=3)
-        ttk.Spinbox(f, textvariable=self.vars["width_in"], from_=0.25, to=48, increment=0.25,
-                    width=8).grid(row=r, column=1, sticky="w")
-        self.height_lbl = ttk.Label(f, text="", style="Hint.TLabel")
-        self.height_lbl.grid(row=r, column=2, sticky="w")
-        r += 1
+        # Size: set the width or the height; the other follows the photo's proportions.
+        self.size_spins = {}
+        for key, label in (("width", "Width (in)"), ("height", "Height (in)")):
+            rb = ttk.Radiobutton(f, text=label, value=key, variable=self.vars["size_by"])
+            rb.grid(row=r, column=0, sticky="w", pady=2)
+            sp = ttk.Spinbox(f, textvariable=self.vars[f"{key}_in"], from_=0.25, to=48, increment=0.25, width=8)
+            sp.grid(row=r, column=1, sticky="w")
+            self.size_spins[key] = sp
+            if key == "width":
+                self.height_lbl = ttk.Label(f, text="", style="Hint.TLabel")
+                self.height_lbl.grid(row=r, column=2, rowspan=2, sticky="w")
+                self.size_rows = [rb, sp]
+            else:
+                self.size_rows += [rb, sp]
+            r += 1
         ttk.Label(f, text="DPI").grid(row=r, column=0, sticky="w", pady=3)
         ttk.Combobox(f, textvariable=self.vars["dpi"], values=DPI_CHOICES,
                      width=8).grid(row=r, column=1, sticky="w")
@@ -407,6 +453,28 @@ class App:
                     "so the laser skips it. Also gives the cut outline a real silhouette.\n"
                     "About 1 s per photo once the AI model has loaded (~4 s, in the background).\n"
                     "Paint fixes with the Fix cut-out toolbar above the preview.")
+        r += 1
+        # Crop & rotate (Photos mode only; design layers have their own crop and rotation).
+        self.photo_only = ttk.LabelFrame(f, text="Crop & rotate", padding=6)
+        self.photo_only.grid(row=r, column=0, columnspan=3, sticky="ew", pady=(6, 4))
+        self.photo_only.columnconfigure(1, weight=1)
+        rot = ttk.Frame(self.photo_only)
+        rot.grid(row=0, column=0, columnspan=3, sticky="w")
+        ttk.Button(rot, text="⟲ 90°", width=6, command=lambda: self.turn(-90)).pack(side="left")
+        ttk.Button(rot, text="⟳ 90°", width=6, command=lambda: self.turn(90)).pack(side="left", padx=4)
+        self.rot_lbl = ttk.Label(rot, text="", style="Hint.TLabel")
+        self.rot_lbl.pack(side="left", padx=6)
+        self.straighten = tk.DoubleVar(value=0.0)
+        r2 = self._slider(self.photo_only, 1, "straighten", -15, 15, 0.25, label="Straighten (°)", var=self.straighten)
+        self.straighten.trace_add("write", lambda *_: self._apply_straighten())
+        ttk.Label(self.photo_only, text="Crop (% from each edge)").grid(row=r2, column=0, columnspan=3, sticky="w")
+        cr = ttk.Frame(self.photo_only)
+        cr.grid(row=r2 + 1, column=0, columnspan=3, sticky="w")
+        for i, (key, text) in enumerate((("crop_l", "L"), ("crop_t", "T"), ("crop_r", "R"), ("crop_b", "B"))):
+            ttk.Label(cr, text=text).pack(side="left", padx=(0 if i == 0 else 6, 2))
+            ttk.Spinbox(cr, textvariable=self.vars[key], from_=0, to=90, increment=1, width=4).pack(side="left")
+        ttk.Button(self.photo_only, text="Reset crop & rotate", command=self.reset_crop).grid(
+            row=r2 + 2, column=0, columnspan=3, sticky="w", pady=(6, 0))
         r += 1
         ttk.Checkbutton(f, text="Also save cut outline (SVG)", variable=self.vars["outline"]).grid(
             row=r, column=0, columnspan=3, sticky="w")
@@ -510,8 +578,8 @@ class App:
         ttk.Button(f, text="Revert to preset", command=lambda: self.apply_preset("photo")).grid(
             row=r, column=0, columnspan=3, sticky="w", pady=(10, 0))
 
-    def _slider(self, f, r, name, lo, hi, step, label=None):
-        var = self.vars[name]
+    def _slider(self, f, r, name, lo, hi, step, label=None, var=None):
+        var = var if var is not None else self.vars[name]
         if label is None:
             label = name.replace("_", " ").replace("clahe ", "").replace("sharpen ", "").replace("shadow ", "")
             label = label.capitalize()
@@ -558,6 +626,9 @@ class App:
             d = {k: v.get() for k, v in self.vars.items()}
             d["dpi"] = int(float(d["dpi"]))
             d["width_in"] = round(float(d["width_in"]), 3)
+            d["height_in"] = round(float(d["height_in"]), 3)
+            for k in CROP_FIELDS:
+                d[k] = min(0.9, max(0.0, float(d[k]) / 100))
             for k in INT_FIELDS:
                 d[k] = int(round(d[k]))
             d["clahe_grid"] = max(1, d["clahe_grid"])
@@ -567,9 +638,39 @@ class App:
             s = core.Settings.from_dict(d)
         except (tk.TclError, ValueError):
             return None
-        if s.width_in <= 0 or not 50 <= s.dpi <= 1200 or s.material not in self.materials:
+        if s.width_in <= 0 or s.height_in <= 0 or not 50 <= s.dpi <= 1200 or s.material not in self.materials:
             return None
         return s
+
+    # --- crop & rotate (Photos mode)
+
+    def turn(self, delta):
+        rot = float(self.vars["rotate"].get())
+        self.vars["rotate"].set(round((rot + delta) % 360, 3))
+
+    def _apply_straighten(self):
+        if self.suspend_traces:
+            return
+        rot = float(self.vars["rotate"].get())
+        base = 90 * round(rot / 90)                  # the quarter turn, without the fine angle
+        self.vars["rotate"].set(round((base + self.straighten.get()) % 360, 3))
+
+    def _sync_straighten(self):
+        """Shows the fine part of the rotation on the Straighten slider."""
+        rot = float(self.vars["rotate"].get())
+        fine = round(rot - 90 * round(rot / 90), 3)
+        if abs(self.straighten.get() - fine) > 1e-6:
+            was, self.suspend_traces = self.suspend_traces, True
+            self.straighten.set(fine)
+            self.suspend_traces = was
+
+    def reset_crop(self):
+        self.suspend_traces = True
+        for k in CROP_FIELDS + ("rotate",):
+            self.vars[k].set(0.0)
+        self.straighten.set(0.0)
+        self.suspend_traces = False
+        self.on_change()
 
     def on_material(self):
         s = self.settings()
@@ -786,9 +887,12 @@ class App:
         try:
             for name, value in s.to_dict().items():
                 if name in self.vars:
+                    if name in CROP_FIELDS:
+                        value = round(value * 100, 2)
                     self.vars[name].set(str(value) if name == "dpi" else value)
         finally:
             self.suspend_traces = False
+        self._sync_straighten()
 
     # Fix strokes live in fixes.json per photo in Photos mode, and inside each photo layer in
     # Design mode (so the same photo can be used twice with different fixes).
@@ -843,13 +947,17 @@ class App:
         self.dither_hint.configure(foreground="#666" if photo else "#bbb")
         self.update_fixbar()
         self.update_preset_state()
+        by_h = s.size_by == "height"
+        self.size_spins["width"].state(["disabled"] if by_h else ["!disabled"])
+        self.size_spins["height"].state(["!disabled"] if by_h else ["disabled"])
+        self.rot_lbl.configure(text=f"rotated {s.rotate:g}°" if s.rotate else "")
         path = self.current_file()
-        src = self.src_cache.get(path) or (self.ai_cache.get((path, s.bg_model)) or (None,))[0]
-        if src is None:
+        size = self.last_src_size.get(path)       # after crop/rotate, from the last preview
+        if size is None:
             self.height_lbl.configure(text="")
             return
-        w, h = s.output_size(src.width, src.height)
-        self.height_lbl.configure(text=f"→ {h / s.dpi:.2f} in tall")
+        w_in, h_in = s.size_in(*size)
+        self.height_lbl.configure(text=f"→ {w_in:.2f} in wide" if by_h else f"→ {h_in:.2f} in tall")
 
     def start_preview(self):
         self.pending = None
@@ -915,8 +1023,11 @@ class App:
                 alpha = None
             if gen != self.gen:
                 return
+            if not self.dc.active:                 # Photos mode crop / rotate
+                src, alpha = core.prepare(src, alpha, s)
             gray, result, mask = core.render(src, alpha, s)
-            self.results.put(("preview", gen, path, s, src, gray, result, mask, cutout))
+            stats = core.raster_stats(np.array(result.convert("L")) < 128)
+            self.results.put(("preview", gen, path, s, src, gray, result, mask, cutout, stats))
         except Exception as e:
             self.results.put(("error", gen, f"Could not process {os.path.basename(path)}:\n{e}"))
 
@@ -926,9 +1037,12 @@ class App:
                 msg = self.results.get_nowait()
                 kind = msg[0]
                 if kind == "preview":
-                    _, gen, path, s, src, gray, result, mask, cutout = msg
+                    _, gen, path, s, src, gray, result, mask, cutout, stats = msg
                     if gen == self.gen:
                         self.last_mask = mask
+                        self.last_src_size[path] = src.size
+                        if not self.dc.active:     # in Design mode the estimate covers the design
+                            self.set_estimate(stats, s.dpi, 0.0)
                         self.show_preview(path, s, src, gray, result, cutout)
                 elif kind in ("design", "design_error"):
                     self.dc.on_result(msg)
@@ -988,8 +1102,9 @@ class App:
             self.redraw()
             return
         w, h = result.size
-        eff = src.width / s.width_in
-        text = (f"Output {w} × {h} px  ·  {s.width_in:g} × {h / s.dpi:.2f} in @ {s.dpi} DPI  ·  "
+        w_in, h_in = w / s.dpi, h / s.dpi
+        eff = src.width / w_in
+        text = (f"Output {w} × {h} px  ·  {w_in:.2f} × {h_in:.2f} in @ {s.dpi} DPI  ·  "
                 f"source {src.width} × {src.height} px")
         if eff < s.dpi:
             text += f"  ·  ⚠ source is only {eff:.0f} DPI at this size; it will be upscaled (softer detail)"
@@ -1043,15 +1158,48 @@ class App:
                 method = Image.Resampling.NEAREST        # show the real laser dots
             else:
                 method = Image.Resampling.BILINEAR
-            self.photo = ImageTk.PhotoImage(crop.resize(size, method))
+            shown = crop.resize(size, method)
+            split_x = None
+            if self._comparing():
+                shown, split_x = self._with_original(shown, img, (l, t, r, b), size, ox + l * scale, scale, ox)
+            self.photo = ImageTk.PhotoImage(shown)
             self.canvas.create_image(round(ox + l * scale), round(oy + t * scale),
                                      image=self.photo, anchor="nw")
+            if split_x is not None:
+                y0, y1 = max(0, oy), min(ch, oy + img.height * scale)
+                self.canvas.create_line(split_x, y0, split_x, y1, fill="#f8fafc", width=3)
+                self.canvas.create_line(split_x, y0, split_x, y1, fill="#2563eb", width=1)
+                for text, anchor, dx in (("Original", "ne", -6), (self.view.get(), "nw", 6)):
+                    self.canvas.create_text(split_x + dx, y0 + 6, text=text, anchor=anchor,
+                                            fill="#2563eb", font=("", 9, "bold"))
         self.disp = (scale, ox, oy, self.view_factor.get(self.view.get(), 1.0))
         self.zoom_lbl.configure(text=f"{scale * 100:.0f}%")
         if self.view.get() == "Cut-out" and self.vars["remove_bg"].get():
             self._draw_strokes()
         if self._design_view():
             self.dc.draw_overlay()
+        self._draw_brush()
+
+    def _comparing(self):
+        return (self.compare.get() and self.view.get() in ("Adjusted", "Engraving", "Material look")
+                and "Original" in self.views)
+
+    def _with_original(self, shown, img, box, size, x_left, scale, ox):
+        """Puts the original photo left of the divider (same framing as the shown view)."""
+        orig = self.views["Original"]
+        last = getattr(self, "last", None)
+        if last and last[2].mirror and self.view.get() in ("Adjusted", "Engraving"):
+            orig = ImageOps.mirror(orig)               # those views are mirrored too
+        l, t, r, b = box
+        fx, fy = orig.width / img.width, orig.height / img.height
+        o = orig.crop((round(l * fx), round(t * fy), round(r * fx), round(b * fy))).resize(size, Image.Resampling.BILINEAR)
+        mode = "RGB" if "RGB" in (shown.mode, o.mode) else "L"
+        shown, o = shown.convert(mode), o.convert(mode)
+        split_x = ox + self.split * img.width * scale  # canvas x of the divider
+        cut = int(round(split_x - x_left))
+        if cut > 0:
+            shown.paste(o.crop((0, 0, min(cut, size[0]), size[1])), (0, 0))
+        return shown, split_x
 
     def zoom_by(self, factor, x=None, y=None):
         """Zoom by factor, keeping the image point under (x, y) (default: center) still."""
@@ -1210,9 +1358,90 @@ class App:
             self.dc.on_view_change()               # renders that view if it's out of date
         self.redraw()
 
+    def on_motion(self, e):
+        self._mouse = (e.x, e.y)
+        if self._design_view():
+            self.dc.on_motion(e)
+        self._draw_brush()
+
+    def _draw_brush(self):
+        """Circle under the cursor showing the brush size while a fix tool is active."""
+        self.canvas.delete("brush")
+        if not (self._mouse and self._drawing()):
+            return
+        r = max(1.0, self.brush.get() / 2)
+        x, y = self._mouse
+        self.canvas.create_oval(x - r - 1, y - r - 1, x + r + 1, y + r + 1, outline="white", width=1, tags="brush")
+        self.canvas.create_oval(x - r, y - r, x + r, y + r, outline=STROKE_COLORS[self.tool.get()],
+                                width=1.5, tags="brush")
+
+    # --- keyboard shortcuts (Design mode adds its own in design_ui)
+
+    SHORTCUTS_HELP = ("K / R: smart keep / remove   B / E: brush keep / erase   P or Esc: pan\n"
+                      "[ / ]: brush size   Space + drag: pan   C: compare   Ctrl+0 / Ctrl+1: fit / 100%\n"
+                      "Ctrl+Z: undo fix stroke   Ctrl+S: save engraving (Photos mode)")
+
+    def _bind_shortcuts(self):
+        keys = {"k": "keep", "r": "remove", "b": "paint_keep", "e": "paint_remove", "p": "pan", "Escape": "pan"}
+        for key, tool in keys.items():
+            self.root.bind_all(f"<KeyPress-{key}>", lambda e, t=tool: self._shortcut(e, lambda: self._pick_tool(t)), add="+")
+        self.root.bind_all("<KeyPress-bracketleft>", lambda e: self._shortcut(e, lambda: self._resize_brush(1 / 1.2)), add="+")
+        self.root.bind_all("<KeyPress-bracketright>", lambda e: self._shortcut(e, lambda: self._resize_brush(1.2)), add="+")
+        self.root.bind_all("<KeyPress-c>", lambda e: self._shortcut(e, self._toggle_compare), add="+")
+        self.root.bind_all("<Control-Key-0>", lambda e: self._shortcut(e, self.zoom_fit, ctrl=True), add="+")
+        self.root.bind_all("<Control-Key-1>", lambda e: self._shortcut(e, self.zoom_actual, ctrl=True), add="+")
+        self.root.bind_all("<Control-z>", lambda e: self._shortcut(e, self.undo_stroke, ctrl=True, photos_only=True), add="+")
+        self.root.bind_all("<Control-s>", lambda e: self._shortcut(e, self.save_current, ctrl=True, photos_only=True), add="+")
+        self.root.bind_all("<KeyPress-space>", lambda e: self._shortcut(e, lambda: self._set_space(True)), add="+")
+        self.root.bind_all("<KeyRelease-space>", lambda e: self._set_space(False), add="+")
+
+    def _shortcut(self, e, fn, ctrl=False, photos_only=False):
+        if photos_only and self.dc.active:
+            return                                 # Design mode has its own Ctrl+Z / Ctrl+S
+        if (e.state & 0x4) and not ctrl:
+            return                                 # plain-letter shortcuts ignore Ctrl+letter
+        focus = self.root.focus_get()
+        if not ctrl and isinstance(focus, (tk.Entry, ttk.Entry, tk.Text, ttk.Spinbox, ttk.Combobox)):
+            return                                 # typing in a field
+        fn()
+        return "break"
+
+    def _pick_tool(self, tool):
+        if tool != "pan" and not self.fixbar.winfo_ismapped():
+            return                                 # fix tools only exist with Remove background on
+        self.tool.set(tool)
+        self.on_tool()
+        self._draw_brush()
+
+    def _resize_brush(self, f):
+        self.brush.set(int(min(100, max(2, round(self.brush.get() * f)))))
+
+    def _toggle_compare(self):
+        self.compare.set(not self.compare.get())
+        self.redraw()
+
+    def _set_space(self, down):
+        if down != self._space:
+            self._space = down
+            self.canvas.configure(cursor="fleur" if down else ("crosshair" if self._drawing() else "arrow"))
+
+    def _split_x(self):
+        img = self.views.get(self.view.get())
+        if not (img and self.disp):
+            return None
+        scale, ox, _, _ = self.disp
+        return ox + self.split * img.width * scale
+
     def on_press(self, e):
+        if self._space:                            # Space + drag pans in any view or tool
+            self.pan_start(e)
+            return
         if self._design_view():
             self.dc.on_press(e)
+            return
+        sx = self._split_x() if self._comparing() else None
+        if sx is not None and abs(e.x - sx) <= 10:
+            self._split_drag = True                # dragging the before/after divider
             return
         if not self._drawing():
             self.pan_start(e)
@@ -1225,6 +1454,17 @@ class App:
         self.live = (kind, [cx, cy], [self._to_src(cx, cy)], item)
 
     def on_drag(self, e):
+        self._mouse = (e.x, e.y)
+        if self._space:
+            self.pan_move(e)
+            return
+        if self._split_drag:
+            img = self.views.get(self.view.get())
+            if img and self.disp:
+                scale, ox, _, _ = self.disp
+                self.split = min(1.0, max(0.0, (e.x - ox) / (img.width * scale)))
+                self.request_redraw()
+            return
         if self._design_view():
             self.dc.on_drag(e)
             return
@@ -1239,8 +1479,14 @@ class App:
         cpts += [cx, cy]
         spts.append(self._to_src(cx, cy))
         self.canvas.coords(item, *cpts)
+        self._draw_brush()
 
     def on_release(self, e):
+        if self._split_drag:
+            self._split_drag = False
+            return
+        if self._space:
+            return
         if self._design_view():
             self.dc.on_release(e)
             return
@@ -1344,6 +1590,28 @@ class App:
     def set_status(self, text):
         self.status.configure(text=text)
 
+    # ----------------------------------------------------------- estimate
+
+    def set_estimate(self, stats, dpi, cut_mm):
+        self.estimate = (stats, dpi, cut_mm)
+        self.update_estimate()
+
+    def update_estimate(self):
+        if not self.estimate or not (self.estimate[0] or self.estimate[2]):
+            self.estimate_lbl.configure(text="")
+            return
+        stats, dpi, cut_mm = self.estimate
+        try:
+            ev, cv = float(self.engrave_speed.get()), float(self.cut_speed.get())
+        except (tk.TclError, ValueError):
+            return
+        parts = []
+        if stats and stats[1]:
+            parts.append(f"engrave ≈ {core.format_duration(core.estimate_seconds(stats, dpi, ev))}")
+        if cut_mm and cv > 0:
+            parts.append(f"cut ≈ {core.format_duration(cut_mm / cv)}")
+        self.estimate_lbl.configure(text="  ·  ".join(parts) or "nothing to burn")
+
     def _load_state(self):
         try:
             with open(STATE_FILE, encoding="utf-8") as f:
@@ -1358,6 +1626,7 @@ class App:
                  "comparison": self.comparison.get(), "files": self.files,
                  "maximized": self.root.state() == "zoomed",
                  "mode": self.mode.get(), "design_state": self.dc.state(),   # unsaved designs survive
+                 "engrave_speed": self._num(self.engrave_speed, 150.0), "cut_speed": self._num(self.cut_speed, 15.0),
                  **{f"{st}_preset": v.get() for st, v in self.preset_vars.items()}}
         if self.root.state() == "normal":
             state["geometry"] = self.root.geometry()
@@ -1368,6 +1637,13 @@ class App:
         except OSError:
             pass
         self.root.destroy()
+
+    @staticmethod
+    def _num(var, default):
+        try:
+            return float(var.get())
+        except (tk.TclError, ValueError):
+            return default
 
     def on_error(self, exc, val, tb):
         messagebox.showerror("Unexpected error", "".join(traceback.format_exception(exc, val, tb))[-1500:])
