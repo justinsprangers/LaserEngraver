@@ -93,13 +93,24 @@ the **Cut-out** view: your photo in color, with removed areas tinted red.
 3. Repeat where needed. **Undo** removes the last stroke; **Clear fixes** removes them all.
    Right-drag pans in any tool; the mouse wheel zooms.
 
-How it works: the AI (u2net) makes the first cut. Your strokes act as labeled examples of
-"subject" and "background", and their label also spreads a short way across nearby pixels of
-the same color. GrabCut learns a color model for each side (Gaussian mixture models) and re-cuts
-the image with a graph cut, so one stroke fixes the whole wrong region, not just the pixels you
-painted. Only regions your strokes touch change, and the edges around every corrected region are
-re-softened to follow the photo's real edges. A region in a very different color (e.g. a white rim
-next to a black visor) may need its own stroke.
+Rules you can rely on:
+- **Keep only ever adds** to the subject, and **Remove only ever takes away**, and only in the
+  region the stroke touches.
+- Each stroke is applied on top of the previous result, so a new stroke never changes an earlier fix.
+- Painted pixels always get exactly what you painted.
+
+How it works: the AI (u2net) makes the first cut. Each stroke acts as labeled examples of
+"subject" or "background", and its label also spreads a short way across nearby pixels of the same
+color. GrabCut learns a color model for each side (Gaussian mixture models) and re-cuts with a
+graph cut, so one stroke can fix the whole wrong region, not just the pixels you painted. Edges
+around the change are re-softened to follow the photo's real edges. A region in a very different
+color (e.g. a white rim next to a black visor) may need its own stroke.
+
+Speed: the AI model loads in the background as soon as Remove background is on (~4 s), and every
+image in the list is cut out in the background, so clicking one is near-instant. Results (AI
+cut-outs and fixed cut-outs) are saved in `cutout_cache/` (next to `settings.json`), so reopening
+an image, Process all and test cards reuse them. The cache keeps the newest 300 files and is safe
+to delete.
 
 Fixes are saved per image (`fixes.json`, next to `settings.json`) and used by Save, Process all and
 the test card. If the image file changes, its fixes are dropped. Learning happens per image: fixes

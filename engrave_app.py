@@ -87,6 +87,9 @@ class App:
         self.src_cache = {}         # path -> grayscale source (no background removal)
         self.ai_cache = {}          # path -> (RGB, AI alpha)
         self.refined = {}           # path -> (strokes key, grayscale on white, corrected alpha)
+        self.step_cache = {}        # path -> {stroke-prefix key: alpha} so one new stroke = one step
+        self.prefetcher = ThreadPoolExecutor(max_workers=1)   # AI cut-outs for the rest of the list
+        self.prefetched = set()
         self.fixes = self._load_fixes()   # path -> list of feedback strokes
         self.tool = tk.StringVar(value="pan")
         self.brush = tk.IntVar(value=24)
@@ -632,7 +635,7 @@ class App:
             msg = "Updating preview…"
         elif path not in self.ai_cache:
             msg = "Removing background…"
-        elif self.refined.get(path, (None,))[0] != repr(strokes):
+        elif self.refined.get(path, (None,))[0] != core.stroke_key(strokes):
             msg = "Re-evaluating cut-out from your fixes…"
         else:
             msg = "Updating preview…"
@@ -652,10 +655,13 @@ class App:
                 if path not in self.ai_cache:
                     self._remember(self.ai_cache, path, core.ai_cutout(path), limit=4)
                 rgb, a0 = self.ai_cache[path]
-                key = repr(strokes)
+                key = core.stroke_key(strokes)
                 ref = self.refined.get(path)
                 if ref is None or ref[0] != key:
-                    alpha = core.refine_alpha(rgb, a0, strokes)
+                    steps = self.step_cache.setdefault(path, {})
+                    if len(self.step_cache) > 4:            # only keep step results for a few images
+                        self.step_cache.pop(next(k for k in self.step_cache if k != path))
+                    alpha = core.refined_cutout(path, rgb, a0, strokes, steps)
                     ref = (key, core.compose_on_white(rgb, alpha), alpha)
                     self._remember(self.refined, path, ref, limit=4)
                 _, src, alpha = ref
@@ -868,8 +874,29 @@ class App:
         except OSError:
             pass
 
+    def prefetch_cutouts(self):
+        """With Remove background on, load the AI model and cut out every listed image in the
+        background, so each is ready (from the disk cache) by the time you click it."""
+        if not self.vars["remove_bg"].get():
+            return
+        self.prefetcher.submit(core.warm_up)
+        self.prefetched.add(self.current_file())     # the preview itself handles the selected one
+        for f in self.files:
+            if f not in self.prefetched:
+                self.prefetched.add(f)
+                self.prefetcher.submit(self._prefetch_one, f)
+
+    @staticmethod
+    def _prefetch_one(path):
+        try:
+            core.ai_cutout(path)          # result lands in the disk cache
+        except Exception:
+            pass                          # the preview will report real errors
+
     def update_fixbar(self):
         on = self.vars["remove_bg"].get()
+        if on:
+            self.prefetch_cutouts()
         if on and not self.fixbar.winfo_ismapped():
             self.fixbar.pack(fill="x", pady=(0, 4), before=self.canvas_frame)
         elif not on and self.fixbar.winfo_ismapped():

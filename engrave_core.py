@@ -20,12 +20,14 @@ Can also be run from the command line:
     python engrave_core.py photo.jpg --style comic --remove-bg --outline
 """
 
+import hashlib
 import json
 import os
 import sys
+import threading
 from dataclasses import dataclass, asdict, fields
 
-VERSION = "1.1.1"
+VERSION = "1.2.0"
 
 # Where things live. Running from source, everything is in this folder. As an installed app
 # (PyInstaller sets sys.frozen), the program folder is read-only, so user data goes to
@@ -179,16 +181,66 @@ def load_image(path):
 
 
 _rembg_session = None
+_rembg_lock = threading.Lock()
+
+# Cut-out results are cached on disk, keyed by file path + modified time (+ strokes), so
+# nothing is recomputed when you reopen an image, Process all, or make a test card.
+CACHE_DIR = os.path.join(DATA_DIR, "cutout_cache")
+CACHE_VERSION = "2"           # bump when the cut-out algorithm changes, to ignore old results
+CACHE_LIMIT = 300             # newest files kept
+
+
+def warm_up():
+    """Loads the AI model (~4 s: library import + model load). Call early, in a background thread."""
+    global _rembg_session
+    with _rembg_lock:
+        if _rembg_session is None:
+            from rembg import new_session      # imported here: heavy, and only needed for this
+            _rembg_session = new_session("u2net")
+    return _rembg_session
+
+
+def _cache_file(path, tag):
+    st = os.stat(path)
+    base = hashlib.sha1(f"{os.path.abspath(path)}|{st.st_mtime}|{st.st_size}|{CACHE_VERSION}"
+                        .encode()).hexdigest()[:24]
+    return os.path.join(CACHE_DIR, f"{base}_{tag}.png")
+
+
+def _read_mask(f, size):
+    try:
+        m = Image.open(f)
+        m.load()
+        return m if m.size == size and m.mode == "L" else None
+    except (OSError, ValueError):
+        return None
+
+
+def _write_mask(f, mask):
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        tmp = f + ".tmp"
+        mask.save(tmp, "PNG")
+        os.replace(tmp, f)
+        files = sorted((os.path.join(CACHE_DIR, n) for n in os.listdir(CACHE_DIR)
+                        if n.endswith(".png")), key=os.path.getmtime)
+        for old in files[:-CACHE_LIMIT]:
+            os.remove(old)
+    except OSError:
+        pass                                   # caching is optional
 
 
 def ai_cutout(path):
-    """AI subject cut-out (u2net via rembg). Returns (RGB image, alpha mask). ~1-5 s per photo."""
-    global _rembg_session
-    from rembg import new_session, remove      # imported here: heavy, and only needed for this
-    if _rembg_session is None:
-        _rembg_session = new_session("u2net")
+    """AI subject cut-out (u2net via rembg). Returns (RGB image, alpha mask). ~1 s per photo."""
     img = ImageOps.exif_transpose(Image.open(path)).convert("RGB")
-    return img, remove(img, session=_rembg_session).split()[-1]
+    f = _cache_file(path, "ai")
+    hit = _read_mask(f, img.size)
+    if hit is not None:
+        return img, hit
+    from rembg import remove
+    alpha = remove(img, session=warm_up()).split()[-1]
+    _write_mask(f, alpha)
+    return img, alpha
 
 
 def compose_on_white(rgb, alpha):
@@ -218,75 +270,100 @@ def _rasterize(strokes, shape, scale=1.0):
     return keep.astype(bool), remove.astype(bool)
 
 
-def refine_alpha(rgb, alpha, strokes, max_side=400, iterations=4):
-    """Corrected alpha mask from the AI mask plus feedback strokes."""
-    if not strokes:
-        return alpha
+def stroke_key(strokes):
+    """Stable ID for a list of strokes (same whether loaded from JSON or drawn)."""
+    norm = [(k, round(float(r), 1), [(round(float(x), 1), round(float(y), 1)) for x, y in p])
+            for k, r, p in strokes]
+    return hashlib.sha1(repr(norm).encode()).hexdigest()
+
+
+def refine_alpha(rgb, alpha, strokes, cache=None):
+    """
+    Corrected alpha mask: applies the strokes one at a time, each on top of the previous
+    result. A Keep stroke can only add to the subject and a Remove stroke can only take away,
+    so a new fix never undoes or shifts an earlier one. `cache` (a dict) remembers results
+    for each prefix of the stroke list, so adding one stroke only computes one step.
+    """
+    cur, start = alpha, 0
+    if cache is not None:
+        for i in range(len(strokes), 0, -1):
+            hit = cache.get(stroke_key(strokes[:i]))
+            if hit is not None:
+                cur, start = hit, i
+                break
+    for i in range(start, len(strokes)):
+        cur = _apply_stroke(rgb, cur, strokes[:i + 1])
+        if cache is not None:
+            cache[stroke_key(strokes[:i + 1])] = cur
+    return cur
+
+
+def _apply_stroke(rgb, alpha, strokes, max_side=400, iterations=4):
+    """Applies the last stroke in `strokes` to `alpha` (earlier strokes stay as fixed labels)."""
+    kind, radius, pts = strokes[-1]
+    adding = kind == "keep"
     W, H = rgb.size
     k = min(1.0, max_side / max(W, H))
     w, h = max(1, round(W * k)), max(1, round(H * k))
     img = cv2.cvtColor(np.array(rgb.resize((w, h), Image.Resampling.BILINEAR)), cv2.COLOR_RGB2BGR)
     a0 = np.array(alpha.resize((w, h), Image.Resampling.BILINEAR)) >= 128
-    keep, remove = _rasterize(strokes, (h, w), k)
+    new_k, new_r = _rasterize([strokes[-1]], (h, w), k)
+    new = new_k if adding else new_r
 
     mask = np.where(a0, cv2.GC_PR_FGD, cv2.GC_PR_BGD).astype(np.uint8)
-    # Spread each stroke's label over the connected, similar-colored area around it, so the
+    # Spread the new stroke's label over nearby, connected, similar-colored pixels, so the
     # color models aren't trained on the very region you said is wrong.
-    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB).astype(np.float32)
-    for kind, radius, pts in strokes:
-        k_m, r_m = _rasterize([(kind, radius, pts)], (h, w), k)
-        painted = k_m if kind == "keep" else r_m
-        if painted.any():
-            reach = max(4 * radius * k, 0.06 * max(w, h))
-            region = _similar_region(lab, painted, reach)
-            mask[region] = cv2.GC_PR_FGD if kind == "keep" else cv2.GC_PR_BGD
-    mask[keep] = cv2.GC_FGD
-    mask[remove] = cv2.GC_BGD
-    if (mask == cv2.GC_FGD).sum() + (mask == cv2.GC_PR_FGD).sum() == 0 or \
-       (mask == cv2.GC_BGD).sum() + (mask == cv2.GC_PR_BGD).sum() == 0:
-        fg = keep | (a0 & ~remove)                # nothing to learn from on one side
-    else:
+    if new.any():
+        lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB).astype(np.float32)
+        region = _similar_region(lab, new, max(4 * radius * k, 0.06 * max(w, h)))
+        mask[region] = cv2.GC_PR_FGD if adding else cv2.GC_PR_BGD
+    for st in strokes:                         # all strokes are firm labels; later ones win
+        sk, sr = _rasterize([st], (h, w), k)
+        mask[sk if st[0] == "keep" else sr] = cv2.GC_FGD if st[0] == "keep" else cv2.GC_BGD
+
+    has_fg = ((mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD)).any()
+    has_bg = ((mask == cv2.GC_BGD) | (mask == cv2.GC_PR_BGD)).any()
+    accepted = np.zeros((h, w), bool)
+    if has_fg and has_bg:
         # GrabCut: fit color models to the labeled pixels, then a graph cut re-labels the rest.
         bgd, fgd = np.zeros((1, 65), np.float64), np.zeros((1, 65), np.float64)
         cv2.setRNGSeed(0)       # same strokes -> same result (preview matches the saved file)
         cv2.grabCut(img, mask, None, bgd, fgd, iterations, cv2.GC_INIT_WITH_MASK)
         fg = (mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD)
-        # Accept only changed regions that a stroke touches, so untouched areas stay put.
-        changed = (fg != a0).astype(np.uint8)
-        n, labels = cv2.connectedComponents(changed, connectivity=8)
-        near = cv2.dilate((keep | remove).astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
-        touched = np.unique(labels[near & (changed > 0)])
-        accept = np.isin(labels, touched[touched > 0])
-        fg = np.where(accept, fg, a0)
-
-    changed = fg != a0
+        # Only changes in this stroke's direction, in regions this stroke touches.
+        change = (fg & ~a0) if adding else (a0 & ~fg)
+        n, labels = cv2.connectedComponents(change.astype(np.uint8), connectivity=8)
+        near = cv2.dilate(new.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
+        touched = np.unique(labels[near & change])
+        accepted = np.isin(labels, touched[touched > 0])
 
     # Back to full size with smooth boundaries (blur before upscaling avoids stair-steps).
-    up = cv2.resize(cv2.GaussianBlur(fg.astype(np.float32), (0, 0), 0.8), (W, H),
-                    interpolation=cv2.INTER_CUBIC)
-    hard = up >= 0.5
-    keep_f, remove_f = _rasterize(strokes, (H, W))
-    hard[keep_f], hard[remove_f] = True, False
+    up = cv2.resize(cv2.GaussianBlur(accepted.astype(np.float32), (0, 0), 0.8), (W, H),
+                    interpolation=cv2.INTER_CUBIC) >= 0.5
+    new_fk, new_fr = _rasterize([strokes[-1]], (H, W))
+    new_full = new_fk if adding else new_fr
+    region = up | new_full                      # everything this stroke changes
+    A = np.array(alpha).astype(np.float32) / 255
+    hard = (A >= 0.5) | region if adding else (A >= 0.5) & ~region
 
-    # Re-soften every edge near a correction, including the AI's old soft fringe around
-    # regions that moved (otherwise it lingers as ghosts and dashed outlines). Elsewhere the
-    # AI's alpha is kept exactly. The blend weight fades out so there's no seam.
-    changed_full = (cv2.resize(changed.astype(np.uint8), (W, H), interpolation=cv2.INTER_NEAREST) > 0) \
-        | keep_f | remove_f
+    # Re-soften edges around the change so they follow the photo's real edges, and clear the
+    # AI's old soft fringe around removed areas (otherwise it lingers as ghosts / dashed
+    # outlines). Direction-locked too: Keep only raises alpha, Remove only lowers it.
     band = max(7, round(max(W, H) / 80))
-    weight = cv2.dilate(changed_full.astype(np.uint8),
+    weight = cv2.dilate(region.astype(np.uint8),
                         cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * band + 1, 2 * band + 1)))
     weight = np.clip(cv2.GaussianBlur(weight.astype(np.float32), (0, 0), band / 3) * 1.5, 0, 1)
-    A = np.array(alpha).astype(np.float32) / 255
     ys, xs = np.nonzero(weight > 0)
     if len(ys):
         r = max(2, round(max(W, H) / 400))
         y0, y1 = max(0, ys.min() - 2 * r), min(H, ys.max() + 2 * r + 1)
         x0, x1 = max(0, xs.min() - 2 * r), min(W, xs.max() + 2 * r + 1)
         guide = np.array(rgb.convert("L"))[y0:y1, x0:x1].astype(np.float32) / 255
-        soft = _guided_filter(guide, hard[y0:y1, x0:x1].astype(np.float32), r, 1e-3)
-        w = weight[y0:y1, x0:x1]
-        A[y0:y1, x0:x1] = w * np.clip(soft, 0, 1) + (1 - w) * A[y0:y1, x0:x1]
+        soft = np.clip(_guided_filter(guide, hard[y0:y1, x0:x1].astype(np.float32), r, 1e-3), 0, 1)
+        wgt, old = weight[y0:y1, x0:x1], A[y0:y1, x0:x1]
+        blended = wgt * soft + (1 - wgt) * old
+        A[y0:y1, x0:x1] = np.maximum(old, blended) if adding else np.minimum(old, blended)
+    A[new_full] = 1.0 if adding else 0.0        # painted pixels are always obeyed
     return Image.fromarray(np.round(A * 255).astype(np.uint8))
 
 
@@ -314,10 +391,23 @@ def _guided_filter(guide, src, r, eps):
     return box(a) * guide + box(b)
 
 
+def refined_cutout(path, rgb, alpha, strokes, cache=None):
+    """refine_alpha() with a disk cache, so Save / Process all / test card reuse the preview's work."""
+    if not strokes:
+        return alpha
+    f = _cache_file(path, "fix_" + stroke_key(strokes)[:20])
+    hit = _read_mask(f, rgb.size)
+    if hit is not None:
+        return hit
+    alpha = refine_alpha(rgb, alpha, strokes, cache)
+    _write_mask(f, alpha)
+    return alpha
+
+
 def remove_background(path, strokes=None):
     """(grayscale on white, alpha mask), with feedback strokes applied if given."""
     rgb, alpha = ai_cutout(path)
-    alpha = refine_alpha(rgb, alpha, strokes or [])
+    alpha = refined_cutout(path, rgb, alpha, strokes)
     return compose_on_white(rgb, alpha), alpha
 
 
