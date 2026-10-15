@@ -63,8 +63,10 @@ python engrave_app.py
    - **Material look**: the engraving in rough material colors, flipped back to how it reads from
      the front if Mirror is on.
 
-   Set zoom to **100%** (or use the mouse wheel) to see the real dot pattern; drag to pan. "Fit"
-   averages the dots, so it shows overall tone.
+   **Zoom** with the mouse wheel (about 12% per notch, centered on the cursor) or the − / + buttons;
+   the label shows the current %. **Fit** shows the whole image, **100%** shows one engraving dot
+   per screen pixel (best for judging the dot pattern). Drag to pan (right-drag works in any tool);
+   double right-click returns to Fit. Zoomed out, the preview averages the dots to show overall tone.
 4. **Save this engraving** writes the current image. **Process all** runs every image in the list
    with the current settings. Files go to the **Save to** folder (default: `output/`).
 
@@ -92,10 +94,12 @@ the **Cut-out** view: your photo in color, with removed areas tinted red.
    Right-drag pans in any tool; the mouse wheel zooms.
 
 How it works: the AI (u2net) makes the first cut. Your strokes act as labeled examples of
-"subject" and "background". GrabCut learns a color model for each from them (Gaussian mixture
-models) and re-cuts the image with a graph cut, so one stroke fixes the whole wrong region, not
-just the pixels you painted. Only regions your strokes touch change, so the rest stays as it was.
-A region in a very different color (e.g. a white rim next to a black visor) may need its own stroke.
+"subject" and "background", and their label also spreads a short way across nearby pixels of
+the same color. GrabCut learns a color model for each side (Gaussian mixture models) and re-cuts
+the image with a graph cut, so one stroke fixes the whole wrong region, not just the pixels you
+painted. Only regions your strokes touch change, and the edges around every corrected region are
+re-softened to follow the photo's real edges. A region in a very different color (e.g. a white rim
+next to a black visor) may need its own stroke.
 
 Fixes are saved per image (`fixes.json`, next to `settings.json`) and used by Save, Process all and
 the test card. If the image file changes, its fixes are dropped. Learning happens per image: fixes

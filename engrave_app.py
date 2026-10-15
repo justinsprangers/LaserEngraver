@@ -6,6 +6,7 @@ All image processing lives in engrave_core.py; this file is only the window.
 """
 
 import json
+import math
 import os
 import queue
 import subprocess
@@ -25,7 +26,7 @@ STATE_FILE = os.path.join(core.DATA_DIR, "settings.json")
 DEFAULT_OUT = core.DEFAULT_OUT
 ICON = os.path.join(core.HERE, "icon.ico")
 DPI_CHOICES = ("254", "318", "423", "508")   # 0.10, 0.08, 0.06, 0.05 mm line interval
-ZOOMS = ("Fit", "25%", "50%", "100%", "200%", "400%")
+ZOOM_STEP = 1.12          # per mouse-wheel notch
 VIEWS = ("Original", "Cut-out", "Adjusted", "Engraving", "Material look")
 FIXES_FILE = os.path.join(core.DATA_DIR, "fixes.json")
 STROKE_COLORS = {"keep": "#22c55e", "remove": "#ef4444"}
@@ -109,7 +110,10 @@ class App:
         self.out_dir = tk.StringVar(value=state.get("out_dir", DEFAULT_OUT))
         self.comparison = tk.BooleanVar(value=state.get("comparison", False))
         self.view = tk.StringVar(value="Engraving")
-        self.zoom = tk.StringVar(value="Fit")
+        self.zf, self.cu, self.cv = 1.0, 0.5, 0.5   # zoom (x fit) and view center (fraction)
+        self._redraw_pending = False
+        self._pan_from = None
+        self._shown_path = None
 
         self.vars = {}
         for name, value in s.to_dict().items():
@@ -238,10 +242,12 @@ class App:
         for v in VIEWS:
             ttk.Radiobutton(bar, text=v, value=v, variable=self.view,
                             command=self.redraw).pack(side="left", padx=(0, 8))
-        zc = ttk.Combobox(bar, textvariable=self.zoom, values=ZOOMS, width=6, state="readonly")
-        zc.pack(side="right")
-        zc.bind("<<ComboboxSelected>>", lambda e: self.redraw())
-        ttk.Label(bar, text="Zoom").pack(side="right", padx=4)
+        ttk.Button(bar, text="100%", width=5, command=self.zoom_actual).pack(side="right")
+        ttk.Button(bar, text="Fit", width=4, command=self.zoom_fit).pack(side="right", padx=4)
+        ttk.Button(bar, text="+", width=2, command=lambda: self.zoom_by(ZOOM_STEP ** 2)).pack(side="right")
+        self.zoom_lbl = ttk.Label(bar, text="", width=6, anchor="center")
+        self.zoom_lbl.pack(side="right")
+        ttk.Button(bar, text="−", width=2, command=lambda: self.zoom_by(ZOOM_STEP ** -2)).pack(side="right")
 
         # Fix tools: shown only while Remove background is on.
         self.fixbar = ttk.Frame(right)
@@ -265,21 +271,15 @@ class App:
         cf.pack(fill="both", expand=True)
         self.canvas_frame = cf
         self.canvas = tk.Canvas(cf, background="#808080", highlightthickness=0, cursor="fleur")
-        xs = ttk.Scrollbar(cf, orient="horizontal", command=self.canvas.xview)
-        ys = ttk.Scrollbar(cf, orient="vertical", command=self.canvas.yview)
-        self.canvas.configure(xscrollcommand=xs.set, yscrollcommand=ys.set)
-        self.canvas.grid(row=0, column=0, sticky="nsew")
-        ys.grid(row=0, column=1, sticky="ns")
-        xs.grid(row=1, column=0, sticky="ew")
-        cf.rowconfigure(0, weight=1)
-        cf.columnconfigure(0, weight=1)
+        self.canvas.pack(fill="both", expand=True)
         self.canvas.bind("<ButtonPress-1>", self.on_press)
         self.canvas.bind("<B1-Motion>", self.on_drag)
         self.canvas.bind("<ButtonRelease-1>", self.on_release)
-        self.canvas.bind("<ButtonPress-3>", lambda e: self.canvas.scan_mark(e.x, e.y))
-        self.canvas.bind("<B3-Motion>", lambda e: self.canvas.scan_dragto(e.x, e.y, gain=1))
-        self.canvas.bind("<Configure>", lambda e: self.zoom.get() == "Fit" and self.redraw())
+        self.canvas.bind("<ButtonPress-3>", self.pan_start)
+        self.canvas.bind("<B3-Motion>", self.pan_move)
+        self.canvas.bind("<Configure>", lambda e: self.request_redraw())
         self.canvas.bind("<MouseWheel>", self.on_wheel)
+        self.canvas.bind("<Double-Button-3>", lambda e: self.zoom_fit())
 
         self.info = ttk.Label(right, text="", anchor="w", wraplength=900)
         self.info.pack(fill="x", pady=(4, 0))
@@ -715,6 +715,9 @@ class App:
 
     def show_preview(self, path, s, src, gray, result, cutout=None):
         self.last = (self.gen, path, s, gray, result)
+        if path != self._shown_path:              # new image: start zoomed to fit
+            self._shown_path = path
+            self.zf, self.cu, self.cv = 1.0, 0.5, 0.5
         look = self.materials.get(s.material, {}).get("look", ["#ffffff", "#000000"])
         # Black pixels in the output = laser fires. Paint them in the burn color.
         material_look = ImageOps.colorize(result.convert("L"), black=look[1], white=look[0])
@@ -740,31 +743,100 @@ class App:
         self.set_status("")
         self.redraw()
 
+    # ------------------------------------------------------------- zoom/pan
+    # Zoom is stored as a multiple of "fit" (zf) plus the view center as a fraction of the
+    # image (cu, cv), so switching views keeps you looking at the same spot. Only the visible
+    # part of the image is resized each redraw, which keeps zooming smooth on big images.
+
+    def _geometry(self, img):
+        cw, ch = max(self.canvas.winfo_width(), 50), max(self.canvas.winfo_height(), 50)
+        fit = min(cw / img.width, ch / img.height)
+        return cw, ch, fit, fit * self.zf
+
+    def request_redraw(self):
+        if not self._redraw_pending:
+            self._redraw_pending = True
+            self.root.after_idle(self.redraw)
+
     def redraw(self):
+        self._redraw_pending = False
         self.canvas.delete("all")
         img = self.views.get(self.view.get())
         if img is None:
+            self.zoom_lbl.configure(text="")
             return
-        cw, ch = max(self.canvas.winfo_width(), 50), max(self.canvas.winfo_height(), 50)
-        z = self.zoom.get()
-        if z == "Fit":
-            scale = min(cw / img.width, ch / img.height, 1.0)
-        else:
-            scale = int(z[:-1]) / 100
-        dw, dh = max(1, round(img.width * scale)), max(1, round(img.height * scale))
-        disp = img.convert("L") if img.mode == "1" else img
-        if scale < 1:
-            # Averaging (not nearest) so a shrunk dither shows its true tone, not moiré.
-            disp = disp.resize((dw, dh), Image.Resampling.BOX)
-        elif scale > 1:
-            disp = disp.resize((dw, dh), Image.Resampling.NEAREST)
-        self.photo = ImageTk.PhotoImage(disp)
-        x0, y0 = max(0, (cw - dw) // 2), max(0, (ch - dh) // 2)
-        self.canvas.create_image(x0, y0, image=self.photo, anchor="nw")
-        self.canvas.configure(scrollregion=(0, 0, max(cw, dw), max(ch, dh)))
-        self.disp = (scale, x0, y0, self.view_factor.get(self.view.get(), 1.0))
+        cw, ch, fit, scale = self._geometry(img)
+        if self.zf <= 1.0:
+            self.cu, self.cv = 0.5, 0.5
+        ox = cw / 2 - self.cu * img.width * scale        # canvas x of image x=0
+        oy = ch / 2 - self.cv * img.height * scale
+        # Visible part of the image, in image pixels.
+        l, t = max(0, int((0 - ox) / scale)), max(0, int((0 - oy) / scale))
+        r = min(img.width, math.ceil((cw - ox) / scale))
+        b = min(img.height, math.ceil((ch - oy) / scale))
+        if r > l and b > t:
+            crop = img.crop((l, t, r, b))
+            if crop.mode == "1":
+                crop = crop.convert("L")
+            size = (max(1, round((r - l) * scale)), max(1, round((b - t) * scale)))
+            if scale < 1:
+                # Averaging (not nearest) so a shrunk dither shows its true tone, not moiré.
+                method = Image.Resampling.BOX
+            elif self.view.get() in ("Engraving", "Material look"):
+                method = Image.Resampling.NEAREST        # show the real laser dots
+            else:
+                method = Image.Resampling.BILINEAR
+            self.photo = ImageTk.PhotoImage(crop.resize(size, method))
+            self.canvas.create_image(round(ox + l * scale), round(oy + t * scale),
+                                     image=self.photo, anchor="nw")
+        self.disp = (scale, ox, oy, self.view_factor.get(self.view.get(), 1.0))
+        self.zoom_lbl.configure(text=f"{scale * 100:.0f}%")
         if self.view.get() == "Cut-out" and self.vars["remove_bg"].get():
             self._draw_strokes()
+
+    def zoom_by(self, factor, x=None, y=None):
+        """Zoom by factor, keeping the image point under (x, y) (default: center) still."""
+        img = self.views.get(self.view.get())
+        if img is None:
+            return
+        cw, ch, fit, scale = self._geometry(img)
+        new_zf = min(max(self.zf * factor, 1.0), max(1.0, 16 / fit))   # fit .. 1600%
+        if new_zf == self.zf:
+            return
+        x = cw / 2 if x is None else x
+        y = ch / 2 if y is None else y
+        _, ox, oy, _ = self.disp
+        px, py = (x - ox) / scale, (y - oy) / scale       # image point under the cursor
+        new_scale = fit * new_zf
+        self.cu = min(1, max(0, (px - (x - cw / 2) / new_scale) / img.width))
+        self.cv = min(1, max(0, (py - (y - ch / 2) / new_scale) / img.height))
+        self.zf = new_zf
+        self.request_redraw()
+
+    def zoom_fit(self):
+        self.zf, self.cu, self.cv = 1.0, 0.5, 0.5
+        self.request_redraw()
+
+    def zoom_actual(self):
+        img = self.views.get(self.view.get())
+        if img is not None:
+            self.zoom_by(1 / (self._geometry(img)[2] * self.zf))
+
+    def on_wheel(self, e):
+        self.zoom_by(ZOOM_STEP ** (e.delta / 120), e.x, e.y)
+
+    def pan_start(self, e):
+        self._pan_from = (e.x, e.y, self.cu, self.cv)
+
+    def pan_move(self, e):
+        img = self.views.get(self.view.get())
+        if img is None or self.zf <= 1.0 or not self._pan_from:
+            return
+        x0, y0, cu, cv = self._pan_from
+        scale = self._geometry(img)[3]
+        self.cu = min(1, max(0, cu - (e.x - x0) / scale / img.width))
+        self.cv = min(1, max(0, cv - (e.y - y0) / scale / img.height))
+        self.request_redraw()
 
     # ------------------------------------------------------- cut-out fixes
 
@@ -823,7 +895,7 @@ class App:
 
     def on_press(self, e):
         if not self._drawing():
-            self.canvas.scan_mark(e.x, e.y)
+            self.pan_start(e)
             return
         cx, cy = self.canvas.canvasx(e.x), self.canvas.canvasy(e.y)
         kind = self.tool.get()
@@ -835,7 +907,7 @@ class App:
     def on_drag(self, e):
         if not self.live:
             if not self._drawing():
-                self.canvas.scan_dragto(e.x, e.y, gain=1)
+                self.pan_move(e)
             return
         cx, cy = self.canvas.canvasx(e.x), self.canvas.canvasy(e.y)
         kind, cpts, spts, item = self.live
@@ -883,12 +955,6 @@ class App:
                 c += [c[0] + 0.1, c[1] + 0.1]
             self.canvas.create_line(*c, fill=STROKE_COLORS[kind], width=max(2, 2 * radius / factor * scale),
                                     capstyle="round", joinstyle="round", stipple="gray25")
-
-    def on_wheel(self, e):
-        i = ZOOMS.index(self.zoom.get())
-        i = min(i + 1, len(ZOOMS) - 1) if e.delta > 0 else max(i - 1, 0)
-        self.zoom.set(ZOOMS[i])
-        self.redraw()
 
     # ---------------------------------------------------------------- saving
 

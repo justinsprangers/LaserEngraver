@@ -25,7 +25,7 @@ import os
 import sys
 from dataclasses import dataclass, asdict, fields
 
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 
 # Where things live. Running from source, everything is in this folder. As an installed app
 # (PyInstaller sets sys.frozen), the program folder is read-only, so user data goes to
@@ -230,12 +230,23 @@ def refine_alpha(rgb, alpha, strokes, max_side=400, iterations=4):
     keep, remove = _rasterize(strokes, (h, w), k)
 
     mask = np.where(a0, cv2.GC_PR_FGD, cv2.GC_PR_BGD).astype(np.uint8)
+    # Spread each stroke's label over the connected, similar-colored area around it, so the
+    # color models aren't trained on the very region you said is wrong.
+    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB).astype(np.float32)
+    for kind, radius, pts in strokes:
+        k_m, r_m = _rasterize([(kind, radius, pts)], (h, w), k)
+        painted = k_m if kind == "keep" else r_m
+        if painted.any():
+            reach = max(4 * radius * k, 0.06 * max(w, h))
+            region = _similar_region(lab, painted, reach)
+            mask[region] = cv2.GC_PR_FGD if kind == "keep" else cv2.GC_PR_BGD
     mask[keep] = cv2.GC_FGD
     mask[remove] = cv2.GC_BGD
     if (mask == cv2.GC_FGD).sum() + (mask == cv2.GC_PR_FGD).sum() == 0 or \
        (mask == cv2.GC_BGD).sum() + (mask == cv2.GC_PR_BGD).sum() == 0:
         fg = keep | (a0 & ~remove)                # nothing to learn from on one side
     else:
+        # GrabCut: fit color models to the labeled pixels, then a graph cut re-labels the rest.
         bgd, fgd = np.zeros((1, 65), np.float64), np.zeros((1, 65), np.float64)
         cv2.setRNGSeed(0)       # same strokes -> same result (preview matches the saved file)
         cv2.grabCut(img, mask, None, bgd, fgd, iterations, cv2.GC_INIT_WITH_MASK)
@@ -248,13 +259,59 @@ def refine_alpha(rgb, alpha, strokes, max_side=400, iterations=4):
         accept = np.isin(labels, touched[touched > 0])
         fg = np.where(accept, fg, a0)
 
-    # Back to full size. Keep the AI's soft edges wherever it already agreed.
-    fg_full = cv2.resize(fg.astype(np.float32), (W, H), interpolation=cv2.INTER_LINEAR) >= 0.5
-    A = np.array(alpha)
-    out = np.where(fg_full, np.where(A >= 128, A, 255), np.where(A < 128, A, 0)).astype(np.uint8)
+    changed = fg != a0
+
+    # Back to full size with smooth boundaries (blur before upscaling avoids stair-steps).
+    up = cv2.resize(cv2.GaussianBlur(fg.astype(np.float32), (0, 0), 0.8), (W, H),
+                    interpolation=cv2.INTER_CUBIC)
+    hard = up >= 0.5
     keep_f, remove_f = _rasterize(strokes, (H, W))
-    out[keep_f], out[remove_f] = 255, 0           # strokes are always obeyed exactly
-    return Image.fromarray(out)
+    hard[keep_f], hard[remove_f] = True, False
+
+    # Re-soften every edge near a correction, including the AI's old soft fringe around
+    # regions that moved (otherwise it lingers as ghosts and dashed outlines). Elsewhere the
+    # AI's alpha is kept exactly. The blend weight fades out so there's no seam.
+    changed_full = (cv2.resize(changed.astype(np.uint8), (W, H), interpolation=cv2.INTER_NEAREST) > 0) \
+        | keep_f | remove_f
+    band = max(7, round(max(W, H) / 80))
+    weight = cv2.dilate(changed_full.astype(np.uint8),
+                        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * band + 1, 2 * band + 1)))
+    weight = np.clip(cv2.GaussianBlur(weight.astype(np.float32), (0, 0), band / 3) * 1.5, 0, 1)
+    A = np.array(alpha).astype(np.float32) / 255
+    ys, xs = np.nonzero(weight > 0)
+    if len(ys):
+        r = max(2, round(max(W, H) / 400))
+        y0, y1 = max(0, ys.min() - 2 * r), min(H, ys.max() + 2 * r + 1)
+        x0, x1 = max(0, xs.min() - 2 * r), min(W, xs.max() + 2 * r + 1)
+        guide = np.array(rgb.convert("L"))[y0:y1, x0:x1].astype(np.float32) / 255
+        soft = _guided_filter(guide, hard[y0:y1, x0:x1].astype(np.float32), r, 1e-3)
+        w = weight[y0:y1, x0:x1]
+        A[y0:y1, x0:x1] = w * np.clip(soft, 0, 1) + (1 - w) * A[y0:y1, x0:x1]
+    return Image.fromarray(np.round(A * 255).astype(np.uint8))
+
+
+def _similar_region(lab, painted, reach, tol=12.0):
+    """
+    Pixels near the paint (within `reach` px) that are connected to it and close in color to
+    it. Deliberately short-range: it only seeds GrabCut, which decides the rest of the region.
+    """
+    center = np.median(lab[painted], axis=0)
+    close = np.sqrt(((lab - center) ** 2).sum(axis=2)) <= tol
+    dist = cv2.distanceTransform((~painted).astype(np.uint8), cv2.DIST_L2, 3)
+    cand = ((close & (dist <= reach)) | painted).astype(np.uint8)
+    n, labels = cv2.connectedComponents(cand, connectivity=4)
+    hit = np.unique(labels[painted])
+    return np.isin(labels, hit[hit > 0])
+
+
+def _guided_filter(guide, src, r, eps):
+    """Edge-aware smoothing (He et al.): softens src's edges so they follow edges in guide."""
+    box = lambda m: cv2.boxFilter(m, -1, (2 * r + 1, 2 * r + 1))
+    mean_i, mean_p = box(guide), box(src)
+    var_i = box(guide * guide) - mean_i * mean_i
+    a = (box(guide * src) - mean_i * mean_p) / (var_i + eps)
+    b = mean_p - a * mean_i
+    return box(a) * guide + box(b)
 
 
 def remove_background(path, strokes=None):
