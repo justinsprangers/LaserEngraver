@@ -23,6 +23,9 @@ from PIL import Image, ImageOps, ImageTk
 
 import design_ui
 import engrave_core as core
+import shortcuts
+import ui_kit
+from ui_kit import ScrollTab, Tooltip, section
 
 STATE_FILE = os.path.join(core.DATA_DIR, "settings.json")
 DEFAULT_OUT = core.DEFAULT_OUT
@@ -58,29 +61,6 @@ TIPS = {
 CROP_FIELDS = ("crop_l", "crop_t", "crop_r", "crop_b")   # fractions in Settings, % in the UI
 INT_FIELDS = ("shadow_radius", "clahe_grid", "sharpen_percent", "sharpen_threshold", "comic_levels",
               "comic_smooth", "comic_line_block", "comic_line_weight", "comic_despeckle")
-
-
-class Tooltip:
-    """Shows a small hint box while the mouse is over a widget."""
-
-    def __init__(self, widget, text):
-        self.widget, self.text, self.tip = widget, text, None
-        widget.bind("<Enter>", self.show, add="+")
-        widget.bind("<Leave>", self.hide, add="+")
-
-    def show(self, _):
-        x = self.widget.winfo_rootx() + 10
-        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
-        self.tip = tk.Toplevel(self.widget)
-        self.tip.wm_overrideredirect(True)
-        self.tip.wm_geometry(f"+{x}+{y}")
-        tk.Label(self.tip, text=self.text, background="#ffffe0", relief="solid",
-                 borderwidth=1, padx=6, pady=3, justify="left").pack()
-
-    def hide(self, _):
-        if self.tip:
-            self.tip.destroy()
-            self.tip = None
 
 
 class App:
@@ -131,6 +111,7 @@ class App:
         self._split_drag = False
         self._space = False         # Space held = pan
         self._mouse = None          # last pointer position on the canvas (for the brush outline)
+        self.set_keymap(shortcuts.load(state.get("shortcuts")))
         self.engrave_speed = tk.DoubleVar(value=state.get("engrave_speed", 150.0))
         self.cut_speed = tk.DoubleVar(value=state.get("cut_speed", 15.0))
 
@@ -181,46 +162,47 @@ class App:
     # ------------------------------------------------------------------ layout
 
     def _build(self):
-        style = ttk.Style()
-        if "vista" in style.theme_names():
-            style.theme_use("vista")
-        style.configure("Hint.TLabel", foreground="#666")
-        style.configure("Warn.TLabel", foreground="#b45309")
-        style.configure("Big.TButton", padding=(10, 6))
-
-        top = ttk.Frame(self.root, padding=(8, 8, 8, 4))
+        ui_kit.apply_theme(self.root)
+        top = ttk.Frame(self.root, padding=(12, 10, 12, 6))
         top.pack(fill="x")
         self.mode_frame = ttk.Frame(top)
-        self.mode_frame.pack(side="left", padx=(0, 16))
+        self.mode_frame.pack(side="left", padx=(0, 4))
+        ttk.Label(self.mode_frame, text="Mode", style="Section.TLabel").pack(side="left", padx=(0, 8))
         for text, val, tip in (("Photos", "photos", "Process photos one by one or in batches."),
                                ("Design", "design", "Lay out photos, logos, SVGs, text and shapes\n"
                                                     "into one engraving, and save it as a project.")):
             rb = ttk.Radiobutton(self.mode_frame, text=text, value=val, variable=self.mode,
                                  command=self.set_mode)
-            rb.pack(side="left", padx=(0, 6))
+            rb.pack(side="left", padx=(0, 8))
             Tooltip(rb, tip)
+        ttk.Separator(self.mode_frame, orient="vertical").pack(side="left", fill="y", padx=(6, 12))
         self.file_toolbar = ttk.Frame(top)
         self.file_toolbar.pack(side="left")
         ttk.Button(self.file_toolbar, text="Add images…", command=self.add_images).pack(side="left")
-        ttk.Button(self.file_toolbar, text="Add folder…", command=self.add_folder).pack(side="left", padx=4)
+        ttk.Button(self.file_toolbar, text="Add folder…", command=self.add_folder).pack(side="left", padx=6)
         ttk.Button(self.file_toolbar, text="Remove", command=self.remove_selected).pack(side="left")
         ttk.Button(top, text="Help", width=6, command=self.open_help).pack(side="right")
+        kb = ttk.Button(top, text="⌨ Shortcuts", command=self.open_shortcuts)
+        kb.pack(side="right", padx=(0, 6))
+        Tooltip(kb, "See and change the keyboard shortcuts")
+        ttk.Separator(top, orient="vertical").pack(side="right", fill="y", padx=10)
         ob = ttk.Button(top, text="Open", width=6, command=self.open_out)
-        ob.pack(side="right", padx=(4, 12))
+        ob.pack(side="right", padx=(6, 0))
         Tooltip(ob, "Open the output folder")
         ttk.Button(top, text="Change…", width=9, command=self.choose_out).pack(side="right")
-        ttk.Entry(top, textvariable=self.out_dir, width=16).pack(side="right", padx=4, fill="x", expand=True)
-        ttk.Label(top, text="Save to:").pack(side="right")
+        ttk.Entry(top, textvariable=self.out_dir, width=16).pack(side="right", padx=6, fill="x", expand=True)
+        ttk.Label(top, text="Save to", style="Section.TLabel").pack(side="right", padx=(12, 0))
 
         # Bottom bar is packed before the body so it can never be squeezed off-screen.
-        bottom = ttk.Frame(self.root, padding=8)
+        bottom = ttk.Frame(self.root, padding=(12, 8))
         bottom.pack(side="bottom", fill="x")
-        self.save_btn = ttk.Button(bottom, text="Save this engraving", style="Big.TButton",
+        ttk.Separator(self.root).pack(side="bottom", fill="x")
+        self.save_btn = ttk.Button(bottom, text="Save this engraving", style="Accent.TButton",
                                    command=self.save_current)
         self.save_btn.pack(side="left")
         self.batch_btn = ttk.Button(bottom, text="Process all", style="Big.TButton",
                                     command=self.process_all)
-        self.batch_btn.pack(side="left", padx=6)
+        self.batch_btn.pack(side="left", padx=8)
         self.comparison_cb = ttk.Checkbutton(bottom, text="Also save side-by-side preview JPG",
                                              variable=self.comparison)
         self.comparison_cb.pack(side="left", padx=8)
@@ -244,20 +226,21 @@ class App:
         for v in (self.engrave_speed, self.cut_speed):
             v.trace_add("write", lambda *_: self.update_estimate())
 
+        ttk.Separator(self.root).pack(fill="x")
         body = ttk.PanedWindow(self.root, orient="horizontal")
-        body.pack(fill="both", expand=True, padx=8)
+        body.pack(fill="both", expand=True, padx=12, pady=(10, 6))
         self.body = body
 
         left = ttk.Frame(body, width=340)
         body.add(left, weight=0)
-        right = ttk.Frame(body)
+        right = ttk.Frame(body, padding=(10, 0, 0, 0))
         body.add(right, weight=1)
 
         # --- file list
-        lf = ttk.LabelFrame(left, text="Images", padding=4)
+        lf = ttk.LabelFrame(left, text=" Images ", padding=(8, 4, 8, 8))
         lf.pack(fill="both", expand=False)
         self.images_frame = lf
-        self.listbox = tk.Listbox(lf, height=5, activestyle="none", exportselection=False)
+        self.listbox = tk.Listbox(lf, height=5, exportselection=False)
         sb = ttk.Scrollbar(lf, command=self.listbox.yview)
         self.listbox.configure(yscrollcommand=sb.set)
         self.listbox.pack(side="left", fill="both", expand=True)
@@ -265,38 +248,23 @@ class App:
         self.listbox.bind("<<ListboxSelect>>", lambda e: self.on_change())
         self.listbox.bind("<Delete>", lambda e: self.remove_selected())
 
-        # --- settings tabs
-        # Settings scroll if the window is too short to show them all.
-        holder = ttk.Frame(left)
-        holder.pack(fill="both", expand=True, pady=(6, 0))
-        sc = tk.Canvas(holder, highlightthickness=0, borderwidth=0)
-        ssb = ttk.Scrollbar(holder, orient="vertical", command=sc.yview)
-        sc.configure(yscrollcommand=ssb.set)
-        ssb.pack(side="right", fill="y")
-        sc.pack(side="left", fill="both", expand=True)
-        nb = ttk.Notebook(sc)
-        win = sc.create_window(0, 0, window=nb, anchor="nw")
-        nb.bind("<Configure>", lambda e: sc.configure(scrollregion=sc.bbox("all"),
-                                                      width=nb.winfo_reqwidth()))
-        sc.bind("<Configure>", lambda e: sc.itemconfigure(win, width=e.width))
-        wheel = lambda e: sc.yview_scroll(-1 if e.delta > 0 else 1, "units")
-        holder.bind("<Enter>", lambda e: sc.bind_all("<MouseWheel>", wheel))
-        holder.bind("<Leave>", lambda e: sc.unbind_all("<MouseWheel>"))
+        # --- settings tabs: the tab headers stay pinned; each page scrolls on its own
+        nb = ttk.Notebook(left)
+        nb.pack(fill="both", expand=True, pady=(10, 0))
         self.left = left
-        basic = ttk.Frame(nb, padding=8)
-        fine = ttk.Frame(nb, padding=8)
-        comic = ttk.Frame(nb, padding=8)
+        basic, fine, comic = ScrollTab(nb), ScrollTab(nb), ScrollTab(nb)
         nb.add(basic, text="Basic")
         nb.add(fine, text="Photo tuning")
         nb.add(comic, text="Comic tuning")
         self.nb, self.basic_tab, self.fine_tab, self.comic_tab = nb, basic, fine, comic
-        self._build_basic(basic)
-        self._build_fine(fine)
-        self._build_comic(comic)
+        self._build_basic(basic.inner)
+        self._build_fine(fine.inner)
+        self._build_comic(comic.inner)
 
         # --- preview
         bar = ttk.Frame(right)
-        bar.pack(fill="x", pady=(0, 4))
+        bar.pack(fill="x", pady=(0, 6))
+        ttk.Label(bar, text="View", style="Section.TLabel").pack(side="left", padx=(0, 10))
         # Shown in Design mode only: Layout (fast, photos unprocessed) and Design (the engraving).
         self.layout_radio = ttk.Radiobutton(bar, text="Layout", value="Layout", variable=self.view,
                                             command=self.on_view_change)
@@ -368,7 +336,7 @@ class App:
         cf = ttk.Frame(right)
         cf.pack(fill="both", expand=True)
         self.canvas_frame = cf
-        self.canvas = tk.Canvas(cf, background="#808080", highlightthickness=0, cursor="fleur")
+        self.canvas = tk.Canvas(cf, background=ui_kit.CANVAS_BG, highlightthickness=0, cursor="fleur")
         self.canvas.pack(fill="both", expand=True)
         self.canvas.bind("<ButtonPress-1>", self.on_press)
         self.canvas.bind("<B1-Motion>", self.on_drag)
@@ -397,67 +365,82 @@ class App:
         self.info.pack(side="left", fill="x", expand=True)
         self.info.bind("<Configure>", lambda e: self.info.configure(wraplength=max(200, e.width)))
 
-        self.dc.build(top, holder, nb, bottom_hide=[self.batch_btn, self.comparison_cb])
+        self.dc.build(top, nb, nb, bottom_hide=[self.batch_btn, self.comparison_cb])
         self._bind_shortcuts()
 
     def _build_basic(self, f):
-        f.columnconfigure(1, weight=1)
-        r = 0
-        ttk.Label(f, text="Style").grid(row=r, column=0, sticky="w", pady=3)
-        sf = ttk.Frame(f)
-        sf.grid(row=r, column=1, columnspan=2, sticky="w")
+        f.columnconfigure(0, weight=1)
+        # --- Style & material
+        sm = section(f, "Style & material", row=0)
+        ttk.Label(sm, text="Style").grid(row=0, column=0, sticky="w", pady=4)
+        sf = ttk.Frame(sm)
+        sf.grid(row=0, column=1, columnspan=2, sticky="w")
         ttk.Radiobutton(sf, text="Photo", value="photo", variable=self.vars["style"]).pack(side="left")
-        ttk.Radiobutton(sf, text="Comic", value="comic", variable=self.vars["style"]).pack(side="left", padx=10)
-        r += 1
-        ttk.Label(f, text="Material").grid(row=r, column=0, sticky="w", pady=3)
-        self.mat_combo = ttk.Combobox(f, textvariable=self.vars["material"], state="readonly",
-                                      values=sorted(self.materials))
-        self.mat_combo.grid(row=r, column=1, columnspan=2, sticky="ew")
-        r += 1
-        # Size: set the width or the height; the other follows the photo's proportions.
+        ttk.Radiobutton(sf, text="Comic", value="comic", variable=self.vars["style"]).pack(side="left", padx=12)
+        ttk.Label(sm, text="Material").grid(row=1, column=0, sticky="w", pady=4, padx=(0, 10))
+        self.mat_combo = ttk.Combobox(sm, textvariable=self.vars["material"], state="readonly",
+                                      values=sorted(self.materials), width=16)
+        self.mat_combo.grid(row=1, column=1, sticky="ew")
+        mb = ttk.Menubutton(sm, text="Manage ▾")
+        mm = tk.Menu(mb, tearoff=False)
+        mm.add_command(label="Reset to saved material settings", command=self.on_material)
+        mm.add_command(label="Save as material…", command=self.save_as_material)
+        mm.add_command(label="Rename material…", command=self.rename_material)
+        mm.add_command(label="Delete material", command=self.delete_material)
+        mb["menu"] = mm
+        mb.grid(row=1, column=2, sticky="e", padx=(8, 0))
+        Tooltip(mb, "Save the tone settings below as a material, or reset / rename / delete one.")
+
+        # --- Size & resolution: set the width or the height; the other follows the photo.
+        sz = section(f, "Size & resolution", row=1)
         self.size_spins = {}
-        for key, label in (("width", "Width (in)"), ("height", "Height (in)")):
-            rb = ttk.Radiobutton(f, text=label, value=key, variable=self.vars["size_by"])
-            rb.grid(row=r, column=0, sticky="w", pady=2)
-            sp = ttk.Spinbox(f, textvariable=self.vars[f"{key}_in"], from_=0.25, to=48, increment=0.25, width=8)
-            sp.grid(row=r, column=1, sticky="w")
+        for i, (key, label) in enumerate((("width", "Width (in)"), ("height", "Height (in)"))):
+            rb = ttk.Radiobutton(sz, text=label, value=key, variable=self.vars["size_by"])
+            rb.grid(row=i, column=0, sticky="w", pady=3, padx=(0, 10))
+            sp = ttk.Spinbox(sz, textvariable=self.vars[f"{key}_in"], from_=0.25, to=48, increment=0.25, width=8)
+            sp.grid(row=i, column=1, sticky="w")
             self.size_spins[key] = sp
             if key == "width":
-                self.height_lbl = ttk.Label(f, text="", style="Hint.TLabel")
-                self.height_lbl.grid(row=r, column=2, rowspan=2, sticky="w")
+                self.height_lbl = ttk.Label(sz, text="", style="Hint.TLabel")
+                self.height_lbl.grid(row=0, column=2, rowspan=2, sticky="w", padx=(8, 0))
                 self.size_rows = [rb, sp]
             else:
                 self.size_rows += [rb, sp]
-            r += 1
-        ttk.Label(f, text="DPI").grid(row=r, column=0, sticky="w", pady=3)
-        ttk.Combobox(f, textvariable=self.vars["dpi"], values=DPI_CHOICES,
-                     width=8).grid(row=r, column=1, sticky="w")
-        self.dpi_lbl = ttk.Label(f, text="", style="Hint.TLabel")
-        self.dpi_lbl.grid(row=r, column=2, sticky="w")
-        r += 1
-        ttk.Label(f, text="Dither").grid(row=r, column=0, sticky="w", pady=3)
-        self.dither_combo = ttk.Combobox(f, textvariable=self.vars["dither"], values=core.DITHER_MODES,
+        ttk.Label(sz, text="DPI").grid(row=2, column=0, sticky="w", pady=3)
+        ttk.Combobox(sz, textvariable=self.vars["dpi"], values=DPI_CHOICES, width=8).grid(row=2, column=1, sticky="w")
+        self.dpi_lbl = ttk.Label(sz, text="", style="Hint.TLabel")
+        self.dpi_lbl.grid(row=2, column=2, sticky="w", padx=(8, 0))
+        ttk.Label(sz, text="Dither").grid(row=3, column=0, sticky="w", pady=3)
+        self.dither_combo = ttk.Combobox(sz, textvariable=self.vars["dither"], values=core.DITHER_MODES,
                                          state="readonly", width=16)
-        self.dither_combo.grid(row=r, column=1, columnspan=2, sticky="w")
-        r += 1
-        self.dither_hint = ttk.Label(f, text="stucki: most detail (acrylic, glass)\n"
-                                             "floyd-steinberg: photos, portraits\n"
-                                             "bayer: wood grain, geometric\n"
-                                             "none: hard cutoff, no shading",
-                                     style="Hint.TLabel", justify="left")
-        self.dither_hint.grid(row=r, column=0, columnspan=3, sticky="w", pady=(0, 4))
-        r += 1
-        cb = ttk.Checkbutton(f, text="Remove background (AI) ⓘ", variable=self.vars["remove_bg"])
-        cb.grid(row=r, column=0, columnspan=3, sticky="w")
+        self.dither_combo.grid(row=3, column=1, columnspan=2, sticky="w")
+        self.dither_hint = ttk.Label(sz, text="stucki: most detail (acrylic, glass)  ·  floyd-steinberg: "
+                                              "photos, portraits  ·  bayer: wood grain, geometric  ·  "
+                                              "none: hard cutoff", style="Hint.TLabel", justify="left",
+                                     wraplength=300)
+        self.dither_hint.grid(row=4, column=0, columnspan=3, sticky="w", pady=(4, 0))
+
+        # --- Background
+        bg = section(f, "Background", row=2)
+        cb = ttk.Checkbutton(bg, text="Remove background (AI) ⓘ", variable=self.vars["remove_bg"])
+        cb.grid(row=0, column=0, columnspan=3, sticky="w")
         Tooltip(cb, "Cuts out the main subject and makes the background blank,\n"
                     "so the laser skips it. Also gives the cut outline a real silhouette.\n"
                     "About 1 s per photo once the AI model has loaded (~4 s, in the background).\n"
                     "Paint fixes with the Fix cut-out toolbar above the preview.")
-        r += 1
-        # Crop & rotate (Photos mode only; design layers have their own crop and rotation).
-        self.photo_only = ttk.LabelFrame(f, text="Crop & rotate", padding=6)
-        self.photo_only.grid(row=r, column=0, columnspan=3, sticky="ew", pady=(6, 4))
-        self.photo_only.columnconfigure(1, weight=1)
+
+        # --- Tone (saved per material)
+        tn = section(f, "Tone", row=3)
+        r = 0
+        for name, lo, hi in (("contrast", 0.5, 2.5), ("brightness", 0.5, 2.0), ("gamma", 0.4, 3.0)):
+            r = self._slider(tn, r, name, lo, hi, 0.05)
+        ttk.Checkbutton(tn, text="Invert (laser makes light marks)",
+                        variable=self.vars["invert"]).grid(row=r, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        ttk.Checkbutton(tn, text="Mirror (engrave from the back)",
+                        variable=self.vars["mirror"]).grid(row=r + 1, column=0, columnspan=3, sticky="w", pady=(2, 0))
+
+        # --- Crop & rotate (Photos mode only; design layers have their own crop and rotation)
+        self.photo_only = section(f, "Crop & rotate", row=4)
         rot = ttk.Frame(self.photo_only)
         rot.grid(row=0, column=0, columnspan=3, sticky="w")
         ttk.Button(rot, text="⟲ 90°", width=6, command=lambda: self.turn(-90)).pack(side="left")
@@ -474,35 +457,15 @@ class App:
             ttk.Label(cr, text=text).pack(side="left", padx=(0 if i == 0 else 6, 2))
             ttk.Spinbox(cr, textvariable=self.vars[key], from_=0, to=90, increment=1, width=4).pack(side="left")
         ttk.Button(self.photo_only, text="Reset crop & rotate", command=self.reset_crop).grid(
-            row=r2 + 2, column=0, columnspan=3, sticky="w", pady=(6, 0))
-        r += 1
-        ttk.Checkbutton(f, text="Also save cut outline (SVG)", variable=self.vars["outline"]).grid(
-            row=r, column=0, columnspan=3, sticky="w")
-        r += 1
-        r = self._slider(f, r, "outline_offset_in", 0, 0.5, 0.01, label="Outline offset (in)")
-        ttk.Separator(f).grid(row=r, column=0, columnspan=3, sticky="ew", pady=4)
-        r += 1
-        ttk.Separator(f).grid(row=r, column=0, columnspan=3, sticky="ew", pady=4)
-        r += 1
-        for name, lo, hi in (("contrast", 0.5, 2.5), ("brightness", 0.5, 2.0), ("gamma", 0.4, 3.0)):
-            r = self._slider(f, r, name, lo, hi, 0.05)
-        ttk.Checkbutton(f, text="Invert (laser makes light marks)",
-                        variable=self.vars["invert"]).grid(row=r, column=0, columnspan=3, sticky="w")
-        r += 1
-        ttk.Checkbutton(f, text="Mirror (engrave from the back)",
-                        variable=self.vars["mirror"]).grid(row=r, column=0, columnspan=3, sticky="w")
-        r += 1
-        bf = ttk.Frame(f)
-        bf.grid(row=r, column=0, columnspan=3, sticky="w", pady=(10, 0))
-        ttk.Button(bf, text="Reset to material", command=self.on_material).pack(side="left")
-        ttk.Button(bf, text="Save as material…", command=self.save_as_material).pack(side="left", padx=4)
-        bf2 = ttk.Frame(f)
-        bf2.grid(row=r + 1, column=0, columnspan=3, sticky="w", pady=(4, 0))
-        ttk.Button(bf2, text="Rename material…", command=self.rename_material).pack(side="left")
-        ttk.Button(bf2, text="Delete material", command=self.delete_material).pack(side="left", padx=4)
-        r += 1
-        tc = ttk.Button(f, text="Make test card ⓘ", command=self.make_test_card)
-        tc.grid(row=r + 1, column=0, columnspan=3, sticky="w", pady=(10, 0))
+            row=r2 + 2, column=0, columnspan=3, sticky="w", pady=(8, 0))
+
+        # --- Extras
+        ex = section(f, "Extras", row=5)
+        ttk.Checkbutton(ex, text="Also save cut outline (SVG)", variable=self.vars["outline"]).grid(
+            row=0, column=0, columnspan=3, sticky="w")
+        r = self._slider(ex, 1, "outline_offset_in", 0, 0.5, 0.01, label="Outline offset (in)")
+        tc = ttk.Button(ex, text="Make test card ⓘ", command=self.make_test_card)
+        tc.grid(row=r, column=0, columnspan=3, sticky="w", pady=(8, 0))
         Tooltip(tc, "Saves a 3x3 grid of this image at different contrast (columns)\n"
                     "and gamma (rows). Burn it on scrap, then type the numbers under\n"
                     "the best tile into Contrast and Gamma.")
@@ -514,12 +477,12 @@ class App:
         ttk.Label(f, text="Used when Style = Comic.", style="Hint.TLabel").grid(
             row=r, column=0, columnspan=3, sticky="w", pady=(0, 4))
         r += 1
-        ttk.Label(f, text="Tones", font=("", 9, "bold")).grid(row=r, column=0, columnspan=3, sticky="w")
+        ttk.Label(f, text="Tones", style="Section.TLabel").grid(row=r, column=0, columnspan=3, sticky="w", pady=(4, 2))
         r += 1
         r = self._slider(f, r, "comic_levels", 2, 5, 1, label="Tone bands")
         r = self._slider(f, r, "comic_smooth", 0, 10, 1, label="Flatten")
         r = self._slider(f, r, "comic_dot_mm", 0.3, 3, 0.05, label="Dot spacing (mm)")
-        ttk.Label(f, text="Ink lines", font=("", 9, "bold")).grid(row=r, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        ttk.Label(f, text="Ink lines", style="Section.TLabel").grid(row=r, column=0, columnspan=3, sticky="w", pady=(12, 2))
         r += 1
         r = self._slider(f, r, "comic_line_block", 3, 61, 2, label="Line scale")
         r = self._slider(f, r, "comic_line_c", 0, 20, 0.5, label="Sensitivity")
@@ -560,17 +523,17 @@ class App:
         ttk.Combobox(f, textvariable=self.vars["dither"], values=core.DITHER_MODES,
                      state="readonly", width=16).grid(row=r, column=1, columnspan=2, sticky="w")
         r += 1
-        ttk.Label(f, text="Shadow detail recovery", font=("", 9, "bold")).grid(row=r, column=0, columnspan=3, sticky="w")
+        ttk.Label(f, text="Shadow detail recovery", style="Section.TLabel").grid(row=r, column=0, columnspan=3, sticky="w", pady=(12, 2))
         r += 1
         r = self._slider(f, r, "shadow_amount", 0, 0.6, 0.01)
         r = self._slider(f, r, "shadow_radius", 1, 60, 1)
-        ttk.Label(f, text="Micro-texture (CLAHE)", font=("", 9, "bold")).grid(row=r, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        ttk.Label(f, text="Micro-texture (CLAHE)", style="Section.TLabel").grid(row=r, column=0, columnspan=3, sticky="w", pady=(12, 2))
         r += 1
         ttk.Checkbutton(f, text="Enabled", variable=self.vars["use_clahe"]).grid(row=r, column=0, columnspan=3, sticky="w")
         r += 1
         r = self._slider(f, r, "clahe_clip", 0.5, 5, 0.1)
         r = self._slider(f, r, "clahe_grid", 2, 32, 1)
-        ttk.Label(f, text="Sharpening", font=("", 9, "bold")).grid(row=r, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        ttk.Label(f, text="Sharpening", style="Section.TLabel").grid(row=r, column=0, columnspan=3, sticky="w", pady=(12, 2))
         r += 1
         r = self._slider(f, r, "sharpen_radius", 0, 8, 0.5)
         r = self._slider(f, r, "sharpen_percent", 0, 400, 5)
@@ -935,7 +898,19 @@ class App:
         self.pending = self.root.after(DEBOUNCE_MS, self.start_preview)
         self.update_labels()
 
+    def update_view_buttons(self):
+        """In Design mode the photo views (Original ... Material look) only make sense with a
+        photo layer selected; grey them out otherwise."""
+        ok = not self.dc.active or self.current_file() is not None
+        for rb in self.view_radios:
+            rb.state(["!disabled"] if ok else ["disabled"])
+        self.compare_cb.state(["!disabled"] if ok else ["disabled"])
+        if not ok and self.view.get() in VIEWS:
+            self.view.set("Layout")
+            self.on_view_change()
+
     def update_labels(self):
+        self.update_view_buttons()
         s = self.settings()
         n = len(self.files)
         self.batch_btn.configure(text=f"Process all ({n})" if n else "Process all")
@@ -1375,36 +1350,88 @@ class App:
         self.canvas.create_oval(x - r, y - r, x + r, y + r, outline=STROKE_COLORS[self.tool.get()],
                                 width=1.5, tags="brush")
 
-    # --- keyboard shortcuts (Design mode adds its own in design_ui)
+    # --- keyboard shortcuts: one dispatcher, keys from the editable keymap (shortcuts.py)
 
-    SHORTCUTS_HELP = ("K / R: smart keep / remove   B / E: brush keep / erase   P or Esc: pan\n"
-                      "[ / ]: brush size   Space + drag: pan   C: compare   Ctrl+0 / Ctrl+1: fit / 100%\n"
-                      "Ctrl+Z: undo fix stroke   Ctrl+S: save engraving (Photos mode)")
+    SHORTCUTS_HELP = "See ⌨ Shortcuts (top right) for all keys; you can change them there."
 
     def _bind_shortcuts(self):
-        keys = {"k": "keep", "r": "remove", "b": "paint_keep", "e": "paint_remove", "p": "pan", "Escape": "pan"}
-        for key, tool in keys.items():
-            self.root.bind_all(f"<KeyPress-{key}>", lambda e, t=tool: self._shortcut(e, lambda: self._pick_tool(t)), add="+")
-        self.root.bind_all("<KeyPress-bracketleft>", lambda e: self._shortcut(e, lambda: self._resize_brush(1 / 1.2)), add="+")
-        self.root.bind_all("<KeyPress-bracketright>", lambda e: self._shortcut(e, lambda: self._resize_brush(1.2)), add="+")
-        self.root.bind_all("<KeyPress-c>", lambda e: self._shortcut(e, self._toggle_compare), add="+")
-        self.root.bind_all("<Control-Key-0>", lambda e: self._shortcut(e, self.zoom_fit, ctrl=True), add="+")
-        self.root.bind_all("<Control-Key-1>", lambda e: self._shortcut(e, self.zoom_actual, ctrl=True), add="+")
-        self.root.bind_all("<Control-z>", lambda e: self._shortcut(e, self.undo_stroke, ctrl=True, photos_only=True), add="+")
-        self.root.bind_all("<Control-s>", lambda e: self._shortcut(e, self.save_current, ctrl=True, photos_only=True), add="+")
-        self.root.bind_all("<KeyPress-space>", lambda e: self._shortcut(e, lambda: self._set_space(True)), add="+")
-        self.root.bind_all("<KeyRelease-space>", lambda e: self._set_space(False), add="+")
+        self.root.bind_all("<KeyPress>", self._on_key, add="+")
+        self.root.bind_all("<KeyRelease>", self._on_key_up, add="+")
 
-    def _shortcut(self, e, fn, ctrl=False, photos_only=False):
-        if photos_only and self.dc.active:
-            return                                 # Design mode has its own Ctrl+Z / Ctrl+S
-        if (e.state & 0x4) and not ctrl:
-            return                                 # plain-letter shortcuts ignore Ctrl+letter
+    def set_keymap(self, keymap):
+        self.keymap = keymap
+        self.key_actions = {k: a for a, k in keymap.items() if k}
+
+    def open_shortcuts(self):
+        shortcuts.ShortcutsWindow(self.root, self.keymap, self.set_keymap)
+
+    def _on_key(self, e):
+        key = shortcuts.from_event(e)
+        if key is None:
+            return
+        action = self.key_actions.get(key)
+        if action is None and key == "Esc":
+            action = "tool_pan"                    # Esc always returns to the Pan tool
+        if action is None:                         # Shift+arrow = bigger nudge
+            loose = self.key_actions.get(shortcuts.from_event(e, ignore_shift=True))
+            if loose and loose.startswith("nudge_"):
+                action = loose
+        if action is None:
+            return
         focus = self.root.focus_get()
-        if not ctrl and isinstance(focus, (tk.Entry, ttk.Entry, tk.Text, ttk.Spinbox, ttk.Combobox)):
+        if isinstance(focus, tk.Toplevel) or (focus and str(focus).startswith(".!toplevel")):
+            return                                 # dialogs (e.g. the Shortcuts window) handle their own keys
+        typing = isinstance(focus, (tk.Entry, ttk.Entry, tk.Text, ttk.Spinbox, ttk.Combobox))
+        if typing and "Ctrl+" not in key:
             return                                 # typing in a field
-        fn()
-        return "break"
+        return "break" if self._run_action(action, e) else None
+
+    def _on_key_up(self, e):
+        held = self.keymap.get("pan_hold")
+        if held and shortcuts.from_event(e, ignore_shift=True) in (held, held.replace("Shift+", "")):
+            self._set_space(False)
+
+    def _run_action(self, action, e):
+        """Performs a shortcut. Returns True if it did something."""
+        dc = self.dc
+        tools = {"tool_keep": "keep", "tool_remove": "remove", "brush_keep": "paint_keep",
+                 "brush_erase": "paint_remove", "tool_pan": "pan"}
+        if action in tools:
+            self._pick_tool(tools[action])
+        elif action == "brush_smaller":
+            self._resize_brush(1 / 1.2)
+        elif action == "brush_bigger":
+            self._resize_brush(1.2)
+        elif action == "pan_hold":
+            self._set_space(True)
+        elif action == "compare":
+            self._toggle_compare()
+        elif action == "zoom_fit":
+            self.zoom_fit()
+        elif action == "zoom_100":
+            self.zoom_actual()
+        elif action == "undo":
+            dc.undo() if dc.active else self.undo_stroke()
+        elif action == "redo":
+            if not dc.active:
+                return False
+            dc.redo()
+        elif action == "save":
+            dc.save_project() if dc.active else self.save_current()
+        elif action in ("duplicate", "delete") or action.startswith("nudge_"):
+            if not dc.active:
+                return False
+            if action == "duplicate":
+                dc.duplicate_layer()
+            elif action == "delete":
+                dc.delete_layer()
+            else:
+                dx, dy = {"nudge_left": (-1, 0), "nudge_right": (1, 0),
+                          "nudge_up": (0, -1), "nudge_down": (0, 1)}[action]
+                dc.nudge(dx, dy, e)
+        else:
+            return False
+        return True
 
     def _pick_tool(self, tool):
         if tool != "pan" and not self.fixbar.winfo_ismapped():
@@ -1627,6 +1654,7 @@ class App:
                  "maximized": self.root.state() == "zoomed",
                  "mode": self.mode.get(), "design_state": self.dc.state(),   # unsaved designs survive
                  "engrave_speed": self._num(self.engrave_speed, 150.0), "cut_speed": self._num(self.cut_speed, 15.0),
+                 "shortcuts": {a: k for a, k in self.keymap.items() if k != shortcuts.DEFAULTS[a]},
                  **{f"{st}_preset": v.get() for st, v in self.preset_vars.items()}}
         if self.root.state() == "normal":
             state["geometry"] = self.root.geometry()

@@ -87,7 +87,12 @@ updates when you look at the Design view.
 
 ## Keyboard shortcuts
 
-| Keys | Action |
+Click **⌨ Shortcuts** (top right) to see every shortcut. To change one, select it, click
+**Change…** (or double-click), and press the new key or combination. If that key is already
+used, it asks before moving it. **Reset all** restores the defaults below. Changes are saved
+in `settings.json`.
+
+| Default keys | Action |
 |---|---|
 | K / R | Smart keep / smart remove (with Remove background on) |
 | B / E | Brush keep / brush erase |
@@ -96,9 +101,9 @@ updates when you look at the Design view.
 | Space + drag | Pan, in any tool or view |
 | C | Compare (before/after split) |
 | Ctrl+0 / Ctrl+1 | Zoom to fit / 100% |
-| Ctrl+Z | Undo the last fix stroke (Photos mode) |
+| Ctrl+Z / Ctrl+Y | Undo the last fix stroke (Photos) / undo, redo (Design) |
 | Ctrl+S | Save engraving (Photos mode) / save project (Design mode) |
-| Design mode | Delete, Ctrl+Z / Ctrl+Y, Ctrl+D, arrow keys; see Design mode below |
+| Ctrl+D, Delete, arrow keys | Duplicate, delete, nudge the selected item (Design; Shift = bigger nudge) |
 
 Shortcuts are ignored while you're typing in a field.
 
@@ -313,6 +318,8 @@ Run `python engrave_core.py -h` for all options.
 | `design.py` | Design mode engine: layers, text/arc text/shapes/logos/SVG rendering, compositing, project files. |
 | `design_ui.py` | Design mode screens: layers panel, Design/Layer tabs, drag handles, undo. |
 | `vectors.py` | Cut lines (shapes, letter outlines, SVG paths, traced outlines) and the SVG/DXF writers. |
+| `shortcuts.py` | Keyboard shortcut list, key matching, and the Shortcuts window. |
+| `ui_kit.py` | Look and shared widgets: theme (Sun Valley, `sv-ttk`), tooltips, pinned-tab scrolling pages. |
 | `materials.json` | Material profiles. |
 | `settings.json` | Remembers your last settings and file list (created automatically, not in git). |
 | `output/` | Default save folder (not in git). |

@@ -22,6 +22,7 @@ from PIL import Image, ImageOps
 
 import design as D
 import engrave_core as core
+from ui_kit import ScrollTab, section
 
 HANDLE = 6            # half-size of the corner handles, screen px
 ROT_OFFSET = 28       # rotation handle distance above the box, screen px
@@ -77,7 +78,8 @@ class DesignController:
         self.bottom_hide = bottom_hide
 
         # --- layers panel (replaces the image list)
-        self.layers_frame = ttk.LabelFrame(left_holder_before.master, text="Layers (top first)", padding=4)
+        self.layers_frame = ttk.LabelFrame(left_holder_before.master, text=" Layers (top first) ",
+                                           padding=(8, 4, 8, 8))
         self.left_before = left_holder_before
         lb_row = ttk.Frame(self.layers_frame)
         lb_row.pack(fill="both", expand=True)
@@ -114,99 +116,82 @@ class DesignController:
 
         # --- Design + Layer tabs (added to the notebook while active)
         self.nb = nb
-        self.design_tab = ttk.Frame(nb, padding=8)
-        self.layer_tab = ttk.Frame(nb, padding=8)
+        self.design_tab = ScrollTab(nb)          # tabs stay pinned; pages scroll on their own
+        self.layer_tab = ScrollTab(nb)
         self.scale_from = tk.StringVar(value=self._saved_scale_from)
-        self._build_design_tab(self.design_tab)
+        self._build_design_tab(self.design_tab.inner)
 
-        # --- keys (only act in Design mode and when not typing in a field)
-        root = app.root
-        for seq, fn in (("<Delete>", lambda e: self.delete_layer()),
-                        ("<Control-z>", lambda e: self.undo()), ("<Control-y>", lambda e: self.redo()),
-                        ("<Control-Z>", lambda e: self.undo()), ("<Control-Y>", lambda e: self.redo()),
-                        ("<Control-s>", lambda e: self.save_project()),
-                        ("<Control-d>", lambda e: self.duplicate_layer()),
-                        ("<Left>", lambda e: self.nudge(-1, 0, e)), ("<Right>", lambda e: self.nudge(1, 0, e)),
-                        ("<Up>", lambda e: self.nudge(0, -1, e)), ("<Down>", lambda e: self.nudge(0, 1, e))):
-            root.bind_all(seq, lambda e, fn=fn: self._key(e, fn), add="+")
+        # Keys are handled by App's shortcut dispatcher (customizable, see shortcuts.py).
 
     def _build_design_tab(self, f):
         app = self.app
-        f.columnconfigure(1, weight=1)
-        ttk.Label(f, text="Canvas = the material you're engraving.", style="Hint.TLabel").grid(
-            row=0, column=0, columnspan=3, sticky="w", pady=(0, 6))
+        f.columnconfigure(0, weight=1)
+        # --- Canvas
+        cv = section(f, "Canvas (your material)", row=0)
         self.cw_var = tk.DoubleVar(value=self.design["canvas"]["width_in"])
         self.ch_var = tk.DoubleVar(value=self.design["canvas"]["height_in"])
-        for r, (label, var) in enumerate((("Width (in)", self.cw_var), ("Height (in)", self.ch_var)), start=1):
-            ttk.Label(f, text=label).grid(row=r, column=0, sticky="w", pady=3)
-            ttk.Spinbox(f, textvariable=var, from_=0.5, to=48, increment=0.25, width=8).grid(row=r, column=1, sticky="w")
+        for r, (label, var) in enumerate((("Width (in)", self.cw_var), ("Height (in)", self.ch_var))):
+            ttk.Label(cv, text=label).grid(row=r, column=0, sticky="w", pady=3, padx=(0, 10))
+            ttk.Spinbox(cv, textvariable=var, from_=0.5, to=48, increment=0.25, width=8).grid(row=r, column=1, sticky="w")
             var.trace_add("write", lambda *_: self._canvas_size_changed())
-        ttk.Label(f, text="Preset").grid(row=3, column=0, sticky="w", pady=3)
-        pc = ttk.Combobox(f, values=list(CANVAS_PRESETS), state="readonly", width=18)
-        pc.grid(row=3, column=1, sticky="w")
+        ttk.Label(cv, text="Preset").grid(row=2, column=0, sticky="w", pady=3)
+        pc = ttk.Combobox(cv, values=list(CANVAS_PRESETS), state="readonly", width=18)
+        pc.grid(row=2, column=1, sticky="w")
         pc.bind("<<ComboboxSelected>>", lambda e: self._apply_canvas_preset(pc.get()))
-        ttk.Label(f, text="Resize from").grid(row=4, column=0, sticky="w", pady=3)
-        rf = ttk.Frame(f)
-        rf.grid(row=4, column=1, columnspan=2, sticky="w")
+        ttk.Label(cv, text="Resize from").grid(row=3, column=0, sticky="w", pady=3)
+        rf = ttk.Frame(cv)
+        rf.grid(row=3, column=1, columnspan=2, sticky="w")
         for text, val in (("Opposite corner", "corner"), ("Center", "center")):
             rb = ttk.Radiobutton(rf, text=text, value=val, variable=self.scale_from)
-            rb.pack(side="left", padx=(0, 8))
+            rb.pack(side="left", padx=(0, 10))
             self.Tooltip(rb, "What stays put when you drag a corner handle.\n"
                              "Hold Ctrl while dragging to use the other one.")
-        ttk.Separator(f).grid(row=5, column=0, columnspan=3, sticky="ew", pady=8)
-        r = 6
-        ttk.Label(f, text="Material").grid(row=r, column=0, sticky="w", pady=3)
-        self.design_mat = ttk.Combobox(f, textvariable=app.vars["material"], state="readonly",
+
+        # --- Material & output (whole design)
+        mo = section(f, "Material & output", row=1)
+        ttk.Label(mo, text="Material").grid(row=0, column=0, sticky="w", pady=3, padx=(0, 10))
+        self.design_mat = ttk.Combobox(mo, textvariable=app.vars["material"], state="readonly",
                                        values=sorted(app.materials), width=18)
-        self.design_mat.grid(row=r, column=1, sticky="w")
-        r += 1
-        ttk.Label(f, text="DPI").grid(row=r, column=0, sticky="w", pady=3)
-        ttk.Combobox(f, textvariable=app.vars["dpi"], values=("254", "318", "423", "508"), width=8).grid(
-            row=r, column=1, sticky="w")
-        r += 1
-        ttk.Checkbutton(f, text="Invert (laser makes light marks)", variable=app.vars["invert"]).grid(
-            row=r, column=0, columnspan=3, sticky="w")
-        r += 1
-        ttk.Checkbutton(f, text="Mirror (engrave from the back)", variable=app.vars["mirror"]).grid(
-            row=r, column=0, columnspan=3, sticky="w")
-        r += 1
-        ttk.Separator(f).grid(row=r, column=0, columnspan=3, sticky="ew", pady=8)
-        r += 1
-        ttk.Label(f, text="Export", font=("", 9, "bold")).grid(row=r, column=0, columnspan=3, sticky="w")
-        r += 1
-        ttk.Label(f, text="Cut lines file").grid(row=r, column=0, sticky="w", pady=3)
+        self.design_mat.grid(row=0, column=1, sticky="w")
+        ttk.Label(mo, text="DPI").grid(row=1, column=0, sticky="w", pady=3)
+        ttk.Combobox(mo, textvariable=app.vars["dpi"], values=("254", "318", "423", "508"), width=8).grid(
+            row=1, column=1, sticky="w")
+        ttk.Checkbutton(mo, text="Invert (laser makes light marks)", variable=app.vars["invert"]).grid(
+            row=2, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        ttk.Checkbutton(mo, text="Mirror (engrave from the back)", variable=app.vars["mirror"]).grid(
+            row=3, column=0, columnspan=3, sticky="w", pady=(2, 0))
+
+        # --- Export
+        f_ = section(f, "Export", row=2)
+        ttk.Label(f_, text="Cut lines file").grid(row=0, column=0, sticky="w", pady=3, padx=(0, 10))
         self.cut_fmt = tk.StringVar(value=self._fmt_label(self.design.get("cut_format", "svg")))
-        cf = ttk.Combobox(f, textvariable=self.cut_fmt, state="readonly", width=12,
+        cf = ttk.Combobox(f_, textvariable=self.cut_fmt, state="readonly", width=12,
                           values=list(self.FMT_LABELS.values()))
-        cf.grid(row=r, column=1, sticky="w")
+        cf.grid(row=0, column=1, sticky="w")
         cf.bind("<<ComboboxSelected>>", lambda e: self._set_design_opt(
             "cut_format", next(k for k, v in self.FMT_LABELS.items() if v == self.cut_fmt.get())))
         self.Tooltip(cf, "Vector file for items set to Cut (red lines, in mm).\n"
                          "SVG: xTool, LaserGRBL, LightBurn, Trotec Ruby. DXF: Trotec Ruby, LightBurn, xTool.")
-        r += 1
         self.frame_var = tk.BooleanVar(value=self.design.get("frame", True))
-        cb = ttk.Checkbutton(f, text="Add alignment frame ⓘ", variable=self.frame_var,
+        cb = ttk.Checkbutton(f_, text="Add alignment frame ⓘ", variable=self.frame_var,
                              command=lambda: self._set_design_opt("frame", self.frame_var.get()))
-        cb.grid(row=r, column=0, columnspan=3, sticky="w")
+        cb.grid(row=1, column=0, columnspan=3, sticky="w", pady=(4, 0))
         self.Tooltip(cb, "Adds a blue rectangle the size of the canvas to the cut file.\n"
                          "The engraving PNG is the same size: line their corners up in your\n"
                          "laser software, then delete or disable the blue frame.")
-        r += 1
         self.combined_var = tk.BooleanVar(value=self.design.get("combined", False))
-        cb = ttk.Checkbutton(f, text="Also save combined SVG (engraving + cuts) ⓘ", variable=self.combined_var,
+        cb = ttk.Checkbutton(f_, text="Also save combined SVG ⓘ", variable=self.combined_var,
                              command=lambda: self._set_design_opt("combined", self.combined_var.get()))
-        cb.grid(row=r, column=0, columnspan=3, sticky="w")
+        cb.grid(row=2, column=0, columnspan=3, sticky="w", pady=(2, 0))
         self.Tooltip(cb, "One SVG with the engraving image embedded under the cut lines, already\n"
                          "lined up. Works in LightBurn; not tested in Trotec Ruby or xTool, so\n"
                          "keep the separate PNG + cut file as the reliable option.")
-        r += 1
-        cb = ttk.Checkbutton(f, text="Cut outline around everything engraved", variable=app.vars["outline"])
-        cb.grid(row=r, column=0, columnspan=3, sticky="w")
-        r += 1
-        ttk.Label(f, text="  Outline offset (in)").grid(row=r, column=0, sticky="w")
-        ttk.Spinbox(f, textvariable=app.vars["outline_offset_in"], from_=0, to=1, increment=0.02,
-                    width=8).grid(row=r, column=1, sticky="w")
-        r += 1
+        cb = ttk.Checkbutton(f_, text="Cut outline around everything engraved", variable=app.vars["outline"])
+        cb.grid(row=3, column=0, columnspan=3, sticky="w", pady=(2, 0))
+        ttk.Label(f_, text="Outline offset (in)").grid(row=4, column=0, sticky="w", pady=3)
+        ttk.Spinbox(f_, textvariable=app.vars["outline_offset_in"], from_=0, to=1, increment=0.02,
+                    width=8).grid(row=4, column=1, sticky="w")
+        r = 3
         ttk.Label(f, text="Material, DPI, invert and mirror apply to the whole design. Each photo "
                           "layer has its own style and settings: select it and use the Basic / "
                           "Photo / Comic tabs.\n\n"
@@ -216,10 +201,10 @@ class DesignController:
                           "(hold Alt to move freely). Ctrl+click picks the item underneath. "
                           "Corner squares resize, the circle on top "
                           "rotates (Shift snaps to 15°). Arrow keys nudge (Shift = bigger steps). "
-                          "Mouse wheel zooms, including out past the canvas. Ctrl+Z / Ctrl+Y undo / "
-                          "redo, Ctrl+D duplicates, Delete removes, Ctrl+S saves the project.",
-                  style="Hint.TLabel", justify="left", wraplength=300).grid(
-            row=r, column=0, columnspan=3, sticky="w", pady=(10, 0))
+                          "Mouse wheel zooms, including out past the canvas. All keys: ⌨ Shortcuts "
+                          "(top right).",
+                  style="Hint.TLabel", justify="left", wraplength=320).grid(
+            row=r, column=0, columnspan=3, sticky="w", pady=(2, 0))
 
     FMT_LABELS = {"none": "None", "svg": "SVG", "dxf": "DXF", "svg+dxf": "SVG + DXF"}
 
@@ -346,16 +331,6 @@ class DesignController:
             base += f"  ·  {name}{' *' if self.dirty else ''}"
         app.root.title(base)
 
-    def _key(self, e, fn):
-        if not self.active:
-            return
-        focus = self.app.root.focus_get()
-        if isinstance(focus, (tk.Entry, ttk.Entry, tk.Text, ttk.Spinbox, ttk.Combobox)):
-            if not (e.state & 0x4 and e.keysym.lower() in ("z", "y", "s", "d")):   # Ctrl shortcuts still work
-                return
-        fn(e)
-        return "break"
-
     def _load_globals_into_vars(self):
         app = self.app
         app.suspend_traces = True
@@ -410,7 +385,7 @@ class DesignController:
     # ================================================================ layer tab
 
     def _build_layer_tab(self):
-        f = self.layer_tab
+        f = self.layer_tab.inner
         for w in f.winfo_children():
             w.destroy()
         self.fields = {}
@@ -421,7 +396,7 @@ class DesignController:
                               "text, arc text or shape, or click an item\non the Design view.",
                       style="Hint.TLabel", justify="left").grid(row=0, column=0, sticky="w")
             return
-        ttk.Label(f, text=self._label(layer), font=("", 9, "bold")).grid(row=0, column=0, columnspan=3, sticky="w")
+        ttk.Label(f, text=self._label(layer), style="Title.TLabel").grid(row=0, column=0, columnspan=3, sticky="w")
         out = ttk.Frame(f)
         out.grid(row=1, column=0, columnspan=3, sticky="w", pady=(4, 2))
         ttk.Label(out, text="Output:").pack(side="left")
