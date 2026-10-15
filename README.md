@@ -90,10 +90,15 @@ exports a single engraving, so you don't need Inkscape for the layout step.
    whether to save a cut outline.
 2. **Add ▾** (Layers panel): Photo, Logo / clip art (PNG), SVG, Text, Arc text, Rectangle,
    Circle / ellipse, Line.
-3. Arrange on the **Design** view: drag to move (snaps to the canvas center lines), drag a
-   corner square to resize, drag the circle on top to rotate (Shift snaps to 15°). Arrow keys
-   nudge (Shift = bigger steps). ▲ / ▼ change the stacking order; items higher in the list sit
-   on top.
+3. Arrange on the **Layout** view: it's fast because photos are shown as plain pictures. Switch
+   to the **Design** view to see the real engraving; it only renders when you look at it.
+   - Drag to move. Edges and centers snap to other items and to the canvas edges and center
+     (pink guide lines); hold **Alt** to move freely.
+   - Drag a corner square to resize, or the circle on top to rotate (Shift snaps to 15°).
+   - **Ctrl+click** picks the item underneath, for items stacked on top of each other.
+   - Arrow keys nudge (Shift = bigger steps). The mouse wheel zooms, including out past the
+     canvas edges.
+   - ▲ / ▼ change the stacking order; items higher in the list sit on top.
 4. **Layer** tab: exact position, size and rotation, plus settings for the selected item:
    - Photo: crop (% from each edge). Its style (photo / comic), tone, background removal and
      cut-out fixes are on the Basic / Photo tuning / Comic tuning tabs, separately for every photo.

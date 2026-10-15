@@ -268,11 +268,17 @@ class App:
         # --- preview
         bar = ttk.Frame(right)
         bar.pack(fill="x", pady=(0, 4))
+        # Shown in Design mode only: Layout (fast, photos unprocessed) and Design (the engraving).
+        self.layout_radio = ttk.Radiobutton(bar, text="Layout", value="Layout", variable=self.view,
+                                            command=self.on_view_change)
         self.design_radio = ttk.Radiobutton(bar, text="Design", value="Design", variable=self.view,
-                                            command=self.redraw)        # shown in Design mode only
+                                            command=self.on_view_change)
+        Tooltip(self.layout_radio, "Fast view for arranging: photos are shown as plain pictures,\n"
+                                   "without the engraving processing.")
+        Tooltip(self.design_radio, "The real engraving of the whole design (slower to update).")
         self.view_radios = []
         for v in VIEWS:
-            rb = ttk.Radiobutton(bar, text=v, value=v, variable=self.view, command=self.redraw)
+            rb = ttk.Radiobutton(bar, text=v, value=v, variable=self.view, command=self.on_view_change)
             rb.pack(side="left", padx=(0, 8))
             self.view_radios.append(rb)
 
@@ -848,8 +854,8 @@ class App:
         self.pending = None
         path, s = self.current_file(), self.settings()
         if path is None:
-            if self.dc.active:                     # no photo layer selected: keep the Design view
-                self.views = {k: v for k, v in self.views.items() if k == "Design"}
+            if self.dc.active:                     # no photo layer selected: keep the design views
+                self.views = {k: v for k, v in self.views.items() if k in ("Layout", "Design")}
                 self.redraw()
                 return
             self.views = {}
@@ -959,7 +965,7 @@ class App:
 
     def show_preview(self, path, s, src, gray, result, cutout=None):
         self.last = (self.gen, path, s, gray, result)
-        if path != self._shown_path and self.view.get() != "Design":   # new image: zoom to fit
+        if path != self._shown_path and not self._design_view():     # new image: zoom to fit
             self._shown_path = path
             self.zf, self.cu, self.cv = 1.0, 0.5, 0.5
         look = self.materials.get(s.material, {}).get("look", ["#ffffff", "#000000"])
@@ -967,12 +973,10 @@ class App:
         material_look = ImageOps.colorize(result.convert("L"), black=look[1], white=look[0])
         if s.mirror:
             material_look = ImageOps.mirror(material_look)   # show it as seen from the front
-        design_view = self.views.get("Design")
+        keep = {k: v for k, v in self.views.items() if k in ("Layout", "Design")}
         self.views = {"Original": src, "Adjusted": gray, "Engraving": result,
-                      "Material look": material_look}
-        if design_view is not None:
-            self.views["Design"] = design_view
-        self.view_factor = {}
+                      "Material look": material_look, **keep}
+        self.view_factor = {k: v for k, v in self.view_factor.items() if k == "Layout"}
         if cutout:
             self.views["Cut-out"], self.view_factor["Cut-out"] = cutout
         else:
@@ -1015,6 +1019,7 @@ class App:
         img = self.views.get(self.view.get())
         if img is None:
             self.zoom_lbl.configure(text="")
+            self.disp = None                       # nothing drawn: ignore clicks until it is
             return
         cw, ch, fit, scale = self._geometry(img)
         if self.zf <= 1.0:
@@ -1044,7 +1049,7 @@ class App:
         self.zoom_lbl.configure(text=f"{scale * 100:.0f}%")
         if self.view.get() == "Cut-out" and self.vars["remove_bg"].get():
             self._draw_strokes()
-        if self.dc.active and self.view.get() == "Design":
+        if self._design_view():
             self.dc.draw_overlay()
 
     def zoom_by(self, factor, x=None, y=None):
@@ -1053,8 +1058,10 @@ class App:
         if img is None:
             return
         cw, ch, fit, scale = self._geometry(img)
-        new_zf = min(max(self.zf * factor, 1.0), max(1.0, 16 / fit))   # fit .. 1600%
-        if new_zf == self.zf:
+        # Design views can zoom out past the canvas (to 20% of fit) to see it with some margin.
+        min_zf = 0.2 if self._design_view() else 1.0
+        new_zf = min(max(self.zf * factor, min_zf), max(1.0, 16 / fit))   # .. 1600%
+        if new_zf == self.zf or self.disp is None:
             return
         x = cw / 2 if x is None else x
         y = ch / 2 if y is None else y
@@ -1195,7 +1202,12 @@ class App:
         return ((cx - x0) / scale * factor, (cy - y0) / scale * factor)
 
     def _design_view(self):
-        return self.dc.active and self.view.get() == "Design"
+        return self.dc.active and self.view.get() in ("Layout", "Design")
+
+    def on_view_change(self):
+        if self.dc.active:
+            self.dc.on_view_change()               # renders that view if it's out of date
+        self.redraw()
 
     def on_press(self, e):
         if self._design_view():

@@ -25,7 +25,7 @@ import engrave_core as core
 
 HANDLE = 6            # half-size of the corner handles, screen px
 ROT_OFFSET = 28       # rotation handle distance above the box, screen px
-SNAP_PX = 6           # snap to the canvas center lines within this many screen px
+SNAP_PX = 6           # snap edges/centers within this many screen px (hold Alt to turn off)
 ACCENT = "#2563eb"
 CANVAS_PRESETS = {"4 × 4 in (coaster)": (4, 4), "6 × 4 in": (6, 4), "8 × 8 in": (8, 8),
                   "8 × 10 in": (8, 10), "12 × 12 in": (12, 12)}
@@ -38,8 +38,11 @@ class DesignController:
         self.app, self.Tooltip = app, tooltip_cls
         self.design = D.new_design(app.vars["material"].get() if app.vars["material"].get()
                                    in app.materials else next(iter(app.materials)))
-        self.renderer = D.Renderer()
+        self.renderer = D.Renderer()                 # the real engraving (Design view, export)
+        self.draft = D.Renderer(draft=True)          # fast Layout view
         self.executor = ThreadPoolExecutor(max_workers=1)     # composites run off the UI thread
+        self.gens = {"Layout": 0, "Design": 0}       # per-view render generation (drop stale results)
+        self.stale = {"Layout": True, "Design": True}
         self.active = False
         self.selected = None          # layer id
         self.project_path = None
@@ -47,7 +50,6 @@ class DesignController:
         self.undo_stack, self.redo_stack = [], []
         self.last_snapshot = None
         self._commit_job = None
-        self.cgen = 0                 # composite generation (stale results are dropped)
         self.drag = None
         self.handles = {}
         self._last_live = 0.0
@@ -118,6 +120,7 @@ class DesignController:
         root = app.root
         for seq, fn in (("<Delete>", lambda e: self.delete_layer()),
                         ("<Control-z>", lambda e: self.undo()), ("<Control-y>", lambda e: self.redo()),
+                        ("<Control-Z>", lambda e: self.undo()), ("<Control-Y>", lambda e: self.redo()),
                         ("<Control-s>", lambda e: self.save_project()),
                         ("<Control-d>", lambda e: self.duplicate_layer()),
                         ("<Left>", lambda e: self.nudge(-1, 0, e)), ("<Right>", lambda e: self.nudge(1, 0, e)),
@@ -162,10 +165,14 @@ class DesignController:
         ttk.Label(f, text="Material, DPI, invert and mirror apply to the whole design. Each photo "
                           "layer has its own style and settings: select it and use the Basic / "
                           "Photo / Comic tabs.\n\n"
-                          "On the Design view: drag to move, corner squares to resize, the circle "
-                          "on top to rotate (Shift snaps to 15°). Arrow keys nudge (Shift = bigger "
-                          "steps). Ctrl+Z / Ctrl+Y undo / redo, Ctrl+D duplicates, Delete removes, "
-                          "Ctrl+S saves the project.",
+                          "Arrange on the Layout view (fast; photos shown unprocessed), check the "
+                          "result on the Design view (the real engraving).\n\n"
+                          "Drag to move: edges and centers snap to other items and the canvas "
+                          "(hold Alt to move freely). Ctrl+click picks the item underneath. "
+                          "Corner squares resize, the circle on top "
+                          "rotates (Shift snaps to 15°). Arrow keys nudge (Shift = bigger steps). "
+                          "Mouse wheel zooms, including out past the canvas. Ctrl+Z / Ctrl+Y undo / "
+                          "redo, Ctrl+D duplicates, Delete removes, Ctrl+S saves the project.",
                   style="Hint.TLabel", justify="left", wraplength=300).grid(
             row=r, column=0, columnspan=3, sticky="w", pady=(10, 0))
 
@@ -184,16 +191,18 @@ class DesignController:
         for w in self.bottom_hide:
             w.pack_forget()
         app.save_btn.configure(text="Save engraving")
+        app.layout_radio.pack(side="left", padx=(0, 8), before=app.view_radios[0])
         app.design_radio.pack(side="left", padx=(0, 8), before=app.view_radios[0])
         self._load_globals_into_vars()
         if self.last_snapshot is None:
             self.last_snapshot = copy.deepcopy(self.design)
         layer = self.layer_by_id(self.selected) or (self.design["layers"][-1] if self.design["layers"] else None)
         self.select(layer["id"] if layer else None)
-        app.view.set("Design")
+        app.view.set("Layout")
         app.zoom_fit()
         self.refresh_list()
         self.update_title()
+        self.stale = {"Layout": True, "Design": True}
         self.request_composite()
         self.nb.select(self.design_tab if not self.design["layers"] else self.layer_tab)
 
@@ -212,12 +221,14 @@ class DesignController:
         for w in self.bottom_hide:
             w.pack(side="left", padx=6)
         app.save_btn.configure(text="Save this engraving")
+        app.layout_radio.pack_forget()
         app.design_radio.pack_forget()
-        if app.view.get() == "Design":
+        if app.view.get() in ("Layout", "Design"):
             app.view.set("Engraving")
         if self.photo_snapshot:
             app.load_settings_into_vars(self.photo_snapshot)
         app.views.pop("Design", None)
+        app.views.pop("Layout", None)
         self.update_title()
         app.on_change()
 
@@ -275,10 +286,10 @@ class DesignController:
         if not self.active:
             return
         focus = self.app.root.focus_get()
-        if isinstance(focus, (tk.Entry, ttk.Entry, tk.Text, ttk.Spinbox, ttk.Combobox, tk.Listbox)):
+        if isinstance(focus, (tk.Entry, ttk.Entry, tk.Text, ttk.Spinbox, ttk.Combobox)):
             if not (e.state & 0x4 and e.keysym.lower() in ("z", "y", "s", "d")):   # Ctrl shortcuts still work
                 return
-        fn()
+        fn(e)
         return "break"
 
     def _load_globals_into_vars(self):
@@ -710,54 +721,86 @@ class DesignController:
 
     # ================================================================ rendering
 
-    def request_composite(self):
-        self.cgen += 1
-        gen, snap = self.cgen, copy.deepcopy(self.design)
-        self.executor.submit(self._composite_job, gen, snap)
+    def _shown(self):
+        """Which design view is on screen ("Layout" or "Design"), or None."""
+        v = self.app.view.get()
+        return v if v in ("Layout", "Design") else None
 
-    def _composite_job(self, gen, snap):
-        if gen != self.cgen:
+    def request_composite(self):
+        """Re-renders the design view that's on screen; the other one is marked out of date
+        and rendered when you switch to it. (Photo layer views don't need a composite.)"""
+        self.stale = {"Layout": True, "Design": True}
+        which = self._shown()
+        if which:
+            self._render(which)
+
+    def on_view_change(self):
+        which = self._shown()
+        if which and (self.stale.get(which) or which not in self.app.views):
+            self._render(which)
+
+    def _render(self, which):
+        self.gens[which] += 1
+        self.executor.submit(self._composite_job, which, self.gens[which], copy.deepcopy(self.design))
+
+    def _composite_job(self, which, gen, snap):
+        if gen != self.gens[which]:
             return                                   # a newer request is queued
         try:
             t = time.time()
-            burn, _ = self.renderer.compose(snap)
-            look = self.app.materials.get(snap["material"], {}).get("look", ["#ffffff", "#000000"])
-            img = Image.fromarray(np.where(burn, 0, 255).astype(np.uint8))
-            view = ImageOps.colorize(img, black=look[1], white=look[0])
+            if which == "Layout":
+                gray, _ = self.draft.compose(snap)
+                view, fill = Image.fromarray(gray), None
+            else:
+                burn, _ = self.renderer.compose(snap)
+                look = self.app.materials.get(snap["material"], {}).get("look", ["#ffffff", "#000000"])
+                img = Image.fromarray(np.where(burn, 0, 255).astype(np.uint8))
+                view, fill = ImageOps.colorize(img, black=look[1], white=look[0]), float(burn.mean())
             sizes = {l["id"]: (l["w_in"], l["h_in"]) for l in snap["layers"] if l["type"] in ("text", "arctext")}
-            self.app.results.put(("design", gen, view, sizes, float(burn.mean()), time.time() - t))
+            self.app.results.put(("design", which, gen, view, sizes, fill, time.time() - t))
         except Exception as e:
-            self.app.results.put(("design_error", gen, f"Couldn't render the design: {e}"))
+            self.app.results.put(("design_error", which, gen, f"Couldn't render the design: {e}"))
 
     def on_result(self, msg):
         """Called by App._poll for ("design", ...) messages."""
         app = self.app
         if msg[0] == "design_error":
-            if msg[1] == self.cgen:
-                app.info.configure(text=msg[2], style="Warn.TLabel")
+            if msg[2] == self.gens[msg[1]]:
+                app.info.configure(text=msg[3], style="Warn.TLabel")
             return
-        _, gen, view, sizes, fill, secs = msg
-        if gen != self.cgen or not self.active:
+        _, which, gen, view, sizes, fill, secs = msg
+        if gen != self.gens[which] or not self.active:
             return
+        self.stale[which] = False
         for lid, (w, h) in sizes.items():
             layer = self.layer_by_id(lid)
             if layer and not (self.drag and self.drag["id"] == lid and self.drag["mode"] == "scale"):
                 layer["w_in"], layer["h_in"] = w, h
-        app.views["Design"] = view
+        app.views[which] = view
+        if which == "Layout":
+            app.view_factor["Layout"] = self.design["dpi"] / self.draft.dpi(self.design)
         d = self.design
         n = len(d["layers"])
-        app.info.configure(style="TLabel", text=(
-            f"Canvas {d['canvas']['width_in']:g} × {d['canvas']['height_in']:g} in @ {d['dpi']} DPI  ·  "
-            f"{n} layer{'s' if n != 1 else ''}  ·  laser fires on {fill * 100:.0f}% of the area"
-            + ("  ·  mirrored on export" if d.get("mirror") else "")))
-        if app.view.get() == "Design":
+        text = (f"Canvas {d['canvas']['width_in']:g} × {d['canvas']['height_in']:g} in @ {d['dpi']} DPI  ·  "
+                f"{n} layer{'s' if n != 1 else ''}")
+        if which == "Design":
+            text += f"  ·  laser fires on {fill * 100:.0f}% of the area"
+            text += "  ·  mirrored on export" if d.get("mirror") else ""
+        else:
+            text += "  ·  Layout view: photos shown unprocessed (Design view shows the engraving)"
+        if self._shown() == which:
+            app.info.configure(style="TLabel", text=text)
             app.request_redraw()
 
     # ================================================================ canvas overlay + mouse
 
     def _screen(self):
-        s, ox, oy, _ = self.app.disp
-        return s, ox, oy, self.design["dpi"]
+        """(screen px per design px, canvas x/y of the design origin, design DPI)."""
+        s_view, ox, oy, factor = self.app.disp          # factor = design px per view px
+        return s_view / factor, ox, oy, self.design["dpi"]
+
+    def _view_renderer(self):
+        return self.draft if self._shown() == "Layout" else self.renderer
 
     def draw_overlay(self):
         app, c = self.app, self.app.canvas
@@ -788,6 +831,38 @@ class DesignController:
         c.create_line(tmx, tmy, rx, ry, fill=ACCENT)
         c.create_oval(rx - HANDLE, ry - HANDLE, rx + HANDLE, ry + HANDLE, fill="white", outline=ACCENT)
         self.handles = {"corners": pts, "rot": (rx, ry), "center": (cx, cy)}
+
+    @staticmethod
+    def _box(layer):
+        """Axis-aligned bounds of a (possibly rotated) layer, in inches: (left, top, right, bottom)."""
+        pts = D.corners_px(layer, 1.0)
+        xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+        return min(xs), min(ys), max(xs), max(ys)
+
+    def _snap(self, layer, tol):
+        """Snap the moving layer's edges/center to the canvas and other items' edges/centers.
+        Returns (dx, dy, guides) where guides are ("x" | "y", position in design px)."""
+        dpi = self.design["dpi"]
+        cw, ch = self.design["canvas"]["width_in"], self.design["canvas"]["height_in"]
+        xs, ys = [0.0, cw / 2, cw], [0.0, ch / 2, ch]
+        for other in self.design["layers"]:
+            if other["id"] == layer["id"] or not other.get("visible", True):
+                continue
+            l, t, r, b = self._box(other)
+            xs += [l, (l + r) / 2, r]
+            ys += [t, (t + b) / 2, b]
+        l, t, r, b = self._box(layer)
+        guides, shift = [], [0.0, 0.0]
+        for axis, mine, targets in ((0, (l, (l + r) / 2, r), xs), (1, (t, (t + b) / 2, b), ys)):
+            best = None
+            for m in mine:
+                for v in targets:
+                    if abs(v - m) < tol and (best is None or abs(v - m) < abs(best[0])):
+                        best = (v - m, v)
+            if best:
+                shift[axis] = best[0]
+                guides.append(("x" if axis == 0 else "y", best[1] * dpi))
+        return shift[0], shift[1], guides
 
     def _inside(self, layer, x, y):
         s, ox, oy, dpi = self._screen()
@@ -822,7 +897,12 @@ class DesignController:
         s, ox, oy, dpi = self._screen()
         # The topmost item under the cursor wins; empty parts of the selected item's box
         # (e.g. between letters) still drag the selected item.
-        hit = self.renderer.hit_test(self.design, (e.x - ox) / s, (e.y - oy) / s)
+        s_view = app.disp[0]                         # hit-testing works in the shown view's pixels
+        hits = self._view_renderer().hits(self.design, (e.x - ox) / s_view, (e.y - oy) / s_view)
+        hit = hits[0] if hits else None
+        if e.state & 0x4 and hits:                   # Ctrl+click: cycle to the item underneath
+            ids = [h["id"] for h in hits]
+            hit = hits[(ids.index(self.selected) + 1) % len(hits)] if self.selected in ids else hits[0]
         if hit is None and layer and self._inside(layer, e.x, e.y):
             hit = layer
         if hit is None:
@@ -850,17 +930,12 @@ class DesignController:
             dx, dy = (e.x - self.drag["x0"]) / s / dpi, (e.y - self.drag["y0"]) / s / dpi
             if shift:                                   # constrain to one axis
                 dx, dy = (dx, 0) if abs(dx) > abs(dy) else (0, dy)
-            x, y = start["x_in"] + dx, start["y_in"] + dy
+            layer["x_in"], layer["y_in"] = start["x_in"] + dx, start["y_in"] + dy
             snaps = []
-            cw, ch = self.design["canvas"]["width_in"], self.design["canvas"]["height_in"]
-            tol = SNAP_PX / s / dpi
-            if abs(x - cw / 2) < tol:
-                x = cw / 2
-                snaps.append(("x", x * dpi))
-            if abs(y - ch / 2) < tol:
-                y = ch / 2
-                snaps.append(("y", y * dpi))
-            layer["x_in"], layer["y_in"] = x, y
+            if not e.state & 0x20000:                   # hold Alt to move without snapping
+                ddx, ddy, snaps = self._snap(layer, SNAP_PX / s / dpi)
+                layer["x_in"] += ddx
+                layer["y_in"] += ddy
             self.drag["snap"] = snaps
         elif mode == "rotate":
             cx, cy = ox + start["x_in"] * dpi * s, oy + start["y_in"] * dpi * s

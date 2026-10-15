@@ -309,6 +309,38 @@ def render_image(layer, design):
 RENDERERS = {"logo": render_logo, "svg": render_svg, "text": render_text,
              "arctext": render_arctext, "shape": render_shape}
 
+DRAFT_DPI = 100          # Layout view resolution: plenty for arranging, fast to redraw
+
+
+def draft_cutout_ready(layer):
+    s = layer["settings"]
+    return bool(s.get("remove_bg")) and core.cached_cutout_alpha(
+        layer["src"], layer.get("strokes") or None, s.get("bg_model", core.DEFAULT_BG_MODEL)) is not None
+
+
+def render_image_draft(layer, dpi):
+    """Photo as a plain grayscale picture (no tone, dithering or AI) for the Layout view.
+    Uses the cut-out only if it's already cached. Returns rotated (tone uint8, cover bool)."""
+    src = core.load_image(layer["src"])
+    s = layer["settings"]
+    alpha = core.cached_cutout_alpha(layer["src"], layer.get("strokes") or None,
+                                     s.get("bg_model", core.DEFAULT_BG_MODEL)) if s.get("remove_bg") else None
+    if alpha is not None and alpha.size != src.size:
+        alpha = None
+    l, t, r, b = layer.get("crop", [0, 0, 1, 1])
+    if (l, t, r, b) != (0, 0, 1, 1):
+        box = (round(l * src.width), round(t * src.height), round(r * src.width), round(b * src.height))
+        src = src.crop(box)
+        alpha = alpha.crop(box) if alpha is not None else None
+    size = (_px(layer["w_in"], dpi), _px(layer["h_in"], dpi))
+    src = src.resize(size, Image.Resampling.BILINEAR)
+    alpha = alpha.resize(size, Image.Resampling.BILINEAR) if alpha is not None else Image.new("L", size, 255)
+    rot = layer["rotation"] % 360
+    if rot:
+        src = src.rotate(-rot, resample=Image.Resampling.BILINEAR, expand=True, fillcolor=255)
+        alpha = alpha.rotate(-rot, resample=Image.Resampling.BILINEAR, expand=True, fillcolor=0)
+    return np.array(src), np.array(alpha) > 127
+
 
 def _layer_key(layer, design):
     """Everything that changes how a layer looks, except where it sits."""
@@ -324,21 +356,36 @@ def _layer_key(layer, design):
 
 
 class Renderer:
-    """Renders designs, caching each layer's masks so moving a layer is instant."""
+    """
+    Renders designs, caching each layer's masks so moving a layer is instant.
+    draft=False: the real engraving at the design DPI (photos fully processed and dithered).
+    draft=True:  the Layout view at DRAFT_DPI: photos as plain grayscale pictures, everything
+                 else drawn normally. Fast, for arranging.
+    """
 
-    def __init__(self, limit=40):
-        self.cache, self.limit = {}, limit
+    def __init__(self, limit=40, draft=False):
+        self.cache, self.limit, self.draft = {}, limit, draft
         self.placed = {}           # layer id -> (x0, y0, cover bool array) from the last render
 
+    def dpi(self, design):
+        return min(design["dpi"], DRAFT_DPI) if self.draft else design["dpi"]
+
     def layer_masks(self, layer, design):
-        """(ink, cover) bool arrays for one layer, rotated, at the design DPI."""
+        """(value, cover) arrays for one layer, rotated. value = ink (bool) for the engraving,
+        or gray tone (uint8, 0 = black) for the Layout view."""
         key = _layer_key(layer, design)
+        if self.draft and layer["type"] == "image":
+            key += f"|cut={draft_cutout_ready(layer)}"
         hit = self.cache.get(key)
         if hit is None:
-            dpi = design["dpi"]
+            dpi = self.dpi(design)
             size = None
             if layer["type"] == "image":
-                ink, cover = render_image(layer, design)
+                if self.draft:
+                    value, cover = render_image_draft(layer, dpi)
+                else:
+                    ink, cover = render_image(layer, design)
+                    value, cover = np.array(ink) >= 128, np.array(cover) >= 128
             else:
                 ink, cover = RENDERERS[layer["type"]](layer, dpi)
                 if layer["type"] in ("text", "arctext"):
@@ -347,7 +394,10 @@ class Renderer:
                 if rot:
                     ink = ink.rotate(-rot, resample=Image.Resampling.BICUBIC, expand=True)
                     cover = cover.rotate(-rot, resample=Image.Resampling.BICUBIC, expand=True)
-            hit = (np.array(ink) >= 128, np.array(cover) >= 128, size)
+                value, cover = np.array(ink) >= 128, np.array(cover) >= 128
+                if self.draft:
+                    value = np.where(value, 0, 255).astype(np.uint8)
+            hit = (value, cover, size)
             if len(self.cache) >= self.limit:
                 self.cache.pop(next(iter(self.cache)))
             self.cache[key] = hit
@@ -356,11 +406,13 @@ class Renderer:
         return hit[0], hit[1]
 
     def compose(self, design):
-        """(burn bool array, cover bool array) for the whole canvas, before mirror."""
-        dpi = design["dpi"]
+        """Whole canvas, before mirror: (burn bool, cover bool) for the engraving, or
+        (gray uint8, cover bool) for the Layout view."""
+        dpi = self.dpi(design)
         W = _px(design["canvas"]["width_in"], dpi)
         H = _px(design["canvas"]["height_in"], dpi)
-        burn, cover_all = np.zeros((H, W), bool), np.zeros((H, W), bool)
+        burn = np.full((H, W), 255, np.uint8) if self.draft else np.zeros((H, W), bool)
+        cover_all = np.zeros((H, W), bool)
         self.placed = {}
         for layer in design["layers"]:
             if not layer.get("visible", True):
@@ -385,6 +437,7 @@ class Renderer:
 
     def engraving(self, design):
         """Final 1-bit engraving (mirror applied) and the subject mask for the cut outline."""
+        assert not self.draft, "use a full (non-draft) Renderer for the engraving"
         burn, cover = self.compose(design)
         img = Image.fromarray(np.where(burn, 0, 255).astype(np.uint8)).convert("1")
         if design.get("mirror"):
@@ -392,7 +445,14 @@ class Renderer:
         return img, cover
 
     def hit_test(self, design, x_px, y_px, tolerance=6):
-        """Topmost visible layer at a canvas pixel (uses real shapes, so thin text is clickable)."""
+        """Topmost visible layer at a pixel of this renderer's last composite (real shapes, so
+        thin text is clickable)."""
+        hits = self.hits(design, x_px, y_px, tolerance)
+        return hits[0] if hits else None
+
+    def hits(self, design, x_px, y_px, tolerance=6):
+        """All visible layers under a pixel, topmost first."""
+        found = []
         for layer in reversed(design["layers"]):
             p = self.placed.get(layer["id"])
             if not p or not layer.get("visible", True):
@@ -404,8 +464,8 @@ class Renderer:
                 ys = slice(max(0, ly - tolerance), min(h, ly + tolerance + 1))
                 xs = slice(max(0, lx - tolerance), min(w, lx + tolerance + 1))
                 if cover[ys, xs].any():
-                    return layer
-        return None
+                    found.append(layer)
+        return found
 
 
 def save_engraving(design, renderer, out_path):

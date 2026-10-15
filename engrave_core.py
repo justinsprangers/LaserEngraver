@@ -27,7 +27,7 @@ import sys
 import threading
 from dataclasses import dataclass, asdict, fields
 
-VERSION = "1.5.0"
+VERSION = "1.5.1"
 
 # Where things live. Running from source, everything is in this folder. As an installed app
 # (PyInstaller sets sys.frozen), the program folder is read-only, so user data goes to
@@ -527,6 +527,20 @@ def refined_cutout(path, rgb, alpha, strokes, cache=None, model=DEFAULT_BG_MODEL
     alpha = refine_alpha(rgb, alpha, strokes, cache)
     _write_mask(f, alpha)
     return alpha
+
+
+def cached_cutout_alpha(path, strokes=None, model=DEFAULT_BG_MODEL):
+    """The cut-out mask from the disk cache only (never runs the AI). None if not cached yet."""
+    try:
+        tag = f"fix-{model}-" + stroke_key(strokes)[:20] if strokes else f"ai-{model}"
+        f = _cache_file(path, tag)
+        if not os.path.exists(f):
+            return None
+        m = Image.open(f)
+        m.load()
+        return m if m.mode == "L" else None
+    except (OSError, ValueError):
+        return None
 
 
 def remove_background(path, strokes=None, model=DEFAULT_BG_MODEL):
