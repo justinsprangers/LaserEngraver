@@ -145,8 +145,10 @@ class App:
         self.dc.restore_state(state.get("design_state", {}))
         # Sizes everything for the monitor the window is on x the UI size setting, and follows
         # the window to monitors with different scaling.
-        self.scaler = ui_kit.init_scaling(root, state.get("ui_scale", 1.0))
+        theme = state.get("theme", "Light")
+        self.scaler = ui_kit.init_scaling(root, state.get("ui_scale", 1.0), theme if theme in ui_kit.THEMES else "Light")
         self.ui_size = tk.StringVar(value=f"{round(self.scaler.user_scale * 100)}%")
+        self.theme = tk.StringVar(value=self.scaler.theme_name)
         self._build()
         self._sync_straighten()
         self.scaler.skip.add(str(self.info))      # its wrap width follows its own size
@@ -192,35 +194,46 @@ class App:
         kb = ttk.Button(top, text="⌨ Shortcuts", command=self.open_shortcuts)
         kb.pack(side="right", padx=(0, 6))
         Tooltip(kb, "See and change the keyboard shortcuts")
-        us = ttk.Combobox(top, textvariable=self.ui_size, state="readonly", width=5,
-                          values=[f"{round(v * 100)}%" for v in ui_kit.UI_SIZES])
-        us.pack(side="right", padx=(0, 10))
-        us.bind("<<ComboboxSelected>>", lambda e: self.set_ui_scale(int(self.ui_size.get()[:-1]) / 100))
-        Tooltip(us, "UI size: makes everything bigger or smaller (also Ctrl+= / Ctrl+-).\n"
-                    "The app also adjusts automatically when you move it to a monitor\n"
-                    "with different Windows scaling.")
-        ttk.Label(top, text="UI size", style="Hint.TLabel").pack(side="right", padx=(0, 4))
-        ttk.Separator(top, orient="vertical").pack(side="right", fill="y", padx=10)
-        ob = ttk.Button(top, text="Open", width=6, command=self.open_out)
-        ob.pack(side="right", padx=(6, 0))
-        Tooltip(ob, "Open the output folder")
-        ttk.Button(top, text="Change…", width=9, command=self.choose_out).pack(side="right")
-        ttk.Entry(top, textvariable=self.out_dir, width=16).pack(side="right", padx=6, fill="x", expand=True)
-        ttk.Label(top, text="Save to", style="Section.TLabel").pack(side="right", padx=(12, 0))
-
-        # Bottom bar is packed before the body so it can never be squeezed off-screen.
-        bottom = ttk.Frame(self.root, padding=(12, 8))
-        bottom.pack(side="bottom", fill="x")
+        # Display menu: theme + UI size (kept in one button so the toolbar has room).
+        vm = ttk.Menubutton(top, text="⚙ View")
+        menu = tk.Menu(vm, tearoff=False)
+        menu.add_command(label="Theme", state="disabled")
+        for t in ui_kit.THEMES:
+            menu.add_radiobutton(label=f"   {t}", value=t, variable=self.theme,
+                                 command=lambda: ui_kit.set_theme(self.theme.get()))
+        menu.add_separator()
+        menu.add_command(label="UI size  (Ctrl+= / Ctrl+-)", state="disabled")
+        for v in ui_kit.UI_SIZES:
+            menu.add_radiobutton(label=f"   {round(v * 100)}%", value=f"{round(v * 100)}%", variable=self.ui_size,
+                                 command=lambda v=v: self.set_ui_scale(v))
+        vm["menu"] = menu
+        vm.pack(side="right", padx=(0, 6))
+        Tooltip(vm, "Light / dark theme and UI size. The app also adjusts automatically when\n"
+                    "you move it to a monitor with different Windows scaling.")
+        # Footer (packed before the body so it can never be squeezed off-screen), two rows:
+        #   where files go  |  save buttons, job-time estimate, status
+        footer = ttk.Frame(self.root, padding=(12, 6, 12, 8))
+        footer.pack(side="bottom", fill="x")
         ttk.Separator(self.root).pack(side="bottom", fill="x")
+        out_row = ttk.Frame(footer)
+        out_row.pack(fill="x", pady=(0, 6))
+        ttk.Label(out_row, text="Save to", style="Section.TLabel").pack(side="left", padx=(0, 8))
+        ttk.Entry(out_row, textvariable=self.out_dir, width=20).pack(side="left", fill="x", expand=True)
+        ttk.Button(out_row, text="Change…", style="Tool.TButton", command=self.choose_out).pack(side="left", padx=(6, 0))
+        ob = ttk.Button(out_row, text="Open folder", style="Tool.TButton", command=self.open_out)
+        ob.pack(side="left", padx=(6, 0))
+        Tooltip(ob, "Open the output folder")
+        self.comparison_cb = ttk.Checkbutton(out_row, text="Also save side-by-side preview JPG",
+                                             variable=self.comparison)
+        self.comparison_cb.pack(side="left", padx=(16, 0))
+        bottom = ttk.Frame(footer)
+        bottom.pack(fill="x")
         self.save_btn = ttk.Button(bottom, text="Save this engraving", style="Accent.TButton",
                                    command=self.save_current)
         self.save_btn.pack(side="left")
         self.batch_btn = ttk.Button(bottom, text="Process all", style="Big.TButton",
                                     command=self.process_all)
         self.batch_btn.pack(side="left", padx=8)
-        self.comparison_cb = ttk.Checkbutton(bottom, text="Also save side-by-side preview JPG",
-                                             variable=self.comparison)
-        self.comparison_cb.pack(side="left", padx=8)
         self.progress = ttk.Progressbar(bottom, length=140, mode="determinate")
         self.progress.pack(side="right")
         self.status = ttk.Label(bottom, text="", style="Hint.TLabel")
@@ -228,12 +241,13 @@ class App:
         # Job-time estimate (rough: constant speed, no acceleration).
         est = ttk.Frame(bottom)
         est.pack(side="right", padx=(8, 8))
-        ttk.Label(est, text="Speed mm/s: engrave").pack(side="left")
-        ttk.Spinbox(est, textvariable=self.engrave_speed, from_=1, to=5000, increment=10, width=5).pack(side="left", padx=2)
-        ttk.Label(est, text="cut").pack(side="left", padx=(4, 0))
-        ttk.Spinbox(est, textvariable=self.cut_speed, from_=0.5, to=500, increment=1, width=4).pack(side="left", padx=2)
-        self.estimate_lbl = ttk.Label(est, text="", width=26)
-        self.estimate_lbl.pack(side="left", padx=(6, 0))
+        self.estimate_lbl = ttk.Label(est, text="")
+        self.estimate_lbl.pack(side="left", padx=(0, 12))
+        ttk.Label(est, text="Engrave", style="Hint.TLabel").pack(side="left")
+        ttk.Spinbox(est, textvariable=self.engrave_speed, from_=1, to=5000, increment=10, width=5).pack(side="left", padx=3)
+        ttk.Label(est, text="Cut", style="Hint.TLabel").pack(side="left", padx=(6, 0))
+        ttk.Spinbox(est, textvariable=self.cut_speed, from_=0.5, to=500, increment=1, width=4).pack(side="left", padx=3)
+        ttk.Label(est, text="mm/s", style="Hint.TLabel").pack(side="left")
         Tooltip(self.estimate_lbl, "Rough job time. Engraving: each line is scanned from its first to its\n"
                                    "last dark pixel, plus 2.5 mm overscan at each end, at the engrave\n"
                                    "speed. Cutting: total cut-line length at the cut speed. Ignores\n"
@@ -291,7 +305,7 @@ class App:
         self.view_radios = []
         for v in VIEWS:
             rb = ttk.Radiobutton(bar, text=v, value=v, variable=self.view, command=self.on_view_change)
-            rb.pack(side="left", padx=(0, 8))
+            rb.pack(side="left", padx=(0, 4))
             self.view_radios.append(rb)
         self.compare_cb = ttk.Checkbutton(bar, text="Compare (C)", variable=self.compare, command=self.redraw)
         self.compare_cb.pack(side="right")
@@ -351,7 +365,7 @@ class App:
         cf = ttk.Frame(right)
         cf.pack(fill="both", expand=True)
         self.canvas_frame = cf
-        self.canvas = tk.Canvas(cf, background=ui_kit.CANVAS_BG, highlightthickness=0, cursor="fleur")
+        self.canvas = tk.Canvas(cf, background=ui_kit.P["canvas"], highlightthickness=0, cursor="fleur")
         self.canvas.pack(fill="both", expand=True)
         self.canvas.bind("<ButtonPress-1>", self.on_press)
         self.canvas.bind("<B1-Motion>", self.on_drag)
@@ -396,7 +410,7 @@ class App:
         self.mat_combo = ttk.Combobox(sm, textvariable=self.vars["material"], state="readonly",
                                       values=sorted(self.materials), width=16)
         self.mat_combo.grid(row=1, column=1, sticky="ew")
-        mb = ttk.Menubutton(sm, text="Manage ▾")
+        mb = ttk.Menubutton(sm, text="Manage")
         mm = tk.Menu(mb, tearoff=False)
         mm.add_command(label="Reset to saved material settings", command=self.on_material)
         mm.add_command(label="Save as material…", command=self.save_as_material)
@@ -934,7 +948,7 @@ class App:
         self.dpi_lbl.configure(text=f"{25.4 / s.dpi:.3f} mm line interval")
         photo = s.style == "photo"
         self.dither_combo.state(["!disabled"] if photo else ["disabled"])
-        self.dither_hint.configure(foreground="#666" if photo else "#bbb")
+        self.dither_hint.configure(foreground=ui_kit.P["muted"] if photo else ui_kit.P["border"])
         self.update_fixbar()
         self.update_preset_state()
         by_h = s.size_by == "height"
@@ -1380,7 +1394,7 @@ class App:
 
     def open_shortcuts(self):
         w = shortcuts.ShortcutsWindow(self.root, self.keymap, self.set_keymap)
-        self.scaler.refresh(w.win)
+        ui_kit.adopt(w.win)                        # scale + theme the new window
 
     # --- UI size / monitor scaling
 
@@ -1396,7 +1410,9 @@ class App:
         self.set_ui_scale(sizes[min(len(sizes) - 1, max(0, i + step))])
 
     def _after_rescale(self):
+        """After a UI size, monitor or theme change."""
         self._fit_sash()
+        self.update_labels()
         self.request_redraw()
 
     def _fit_sash(self):
@@ -1697,7 +1713,7 @@ class App:
                  "mode": self.mode.get(), "design_state": self.dc.state(),   # unsaved designs survive
                  "engrave_speed": self._num(self.engrave_speed, 150.0), "cut_speed": self._num(self.cut_speed, 15.0),
                  "shortcuts": {a: k for a, k in self.keymap.items() if k != shortcuts.DEFAULTS[a]},
-                 "ui_scale": self.scaler.user_scale,
+                 "ui_scale": self.scaler.user_scale, "theme": self.theme.get(),
                  **{f"{st}_preset": v.get() for st, v in self.preset_vars.items()}}
         if self.root.state() == "normal":
             state["geometry"] = self.root.geometry()

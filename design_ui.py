@@ -92,7 +92,7 @@ class DesignController:
         self.layer_list.bind("<<ListboxSelect>>", self._on_list_select)
         btns = ttk.Frame(self.layers_frame)
         btns.pack(fill="x", pady=(4, 0))
-        add = ttk.Menubutton(btns, text="Add ▾")
+        add = ttk.Menubutton(btns, text="Add")
         menu = tk.Menu(add, tearoff=False)
         menu.add_command(label="Photo…", command=lambda: self.add_art("image"))
         menu.add_command(label="Logo / clip art (PNG)…", command=lambda: self.add_art("logo"))
@@ -111,7 +111,7 @@ class DesignController:
                                ("Copy", self.duplicate_layer, "Duplicate (Ctrl+D)"),
                                ("Hide", self.toggle_visible, "Hide / show"),
                                ("Delete", self.delete_layer, "Delete (Del)")):
-            b = ttk.Button(btns, text=text, width=6 if len(text) > 2 else 3, command=cmd)
+            b = ttk.Button(btns, text=text, style="Tool.TButton", command=cmd)
             b.pack(side="left", padx=(4, 0))
             self.Tooltip(b, tip)
 
@@ -236,8 +236,8 @@ class DesignController:
         for w in self.bottom_hide:
             w.pack_forget()
         app.save_btn.configure(text="Save engraving")
-        app.layout_radio.pack(side="left", padx=(0, 8), before=app.view_radios[0])
-        app.design_radio.pack(side="left", padx=(0, 8), before=app.view_radios[0])
+        app.layout_radio.pack(side="left", padx=(0, 4), before=app.view_radios[0])
+        app.design_radio.pack(side="left", padx=(0, 12), before=app.view_radios[0])
         self._load_globals_into_vars()
         if self.last_snapshot is None:
             self.last_snapshot = copy.deepcopy(self.design)
@@ -395,7 +395,7 @@ class DesignController:
         f.columnconfigure(1, weight=1)
         layer = self.sel_layer()
         if not layer:
-            ttk.Label(f, text="No layer selected.\n\nUse Add ▾ above to add a photo, logo, SVG,\n"
+            ttk.Label(f, text="No layer selected.\n\nUse Add above to add a photo, logo, SVG,\n"
                               "text, arc text or shape, or click an item\non the Design view.",
                       style="Hint.TLabel", justify="left").grid(row=0, column=0, sticky="w")
             return
@@ -1214,7 +1214,7 @@ class DesignController:
     def export(self):
         app = self.app
         if not self.design["layers"]:
-            messagebox.showinfo("Empty design", "Add something to the design first (Add ▾).")
+            messagebox.showinfo("Empty design", "Add something to the design first (Add).")
             return
         d = self.design
         name = os.path.splitext(os.path.basename(self.project_path))[0] if self.project_path else "design"

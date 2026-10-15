@@ -15,15 +15,19 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk
 
-ACCENT = "#2563eb"
-ACCENT_DARK = "#1d4ed8"
-MUTED = "#6b7280"
-WARN = "#b45309"
-TEXT = "#1f2937"
-BG = "#f3f4f6"
-FIELD = "#ffffff"
-BORDER = "#cbd2dc"
-CANVAS_BG = "#cbd5e1"          # preview background: neutral, so light and dark engravings both read
+PALETTES = {
+    "light": dict(bg="#f3f4f6", field="#ffffff", text="#1f2937", muted="#6b7280", border="#cbd2dc",
+                  accent="#2563eb", accent_hover="#1d4ed8", accent_press="#1e40af", hover="#eef2ff",
+                  press="#dbe4ff", tab="#e5e7eb", trough="#e5e7eb", scale_trough="#dbe2ea",
+                  warn="#b45309", canvas="#cbd5e1", tip_bg="#fffbe6", tip_fg="#1f2937"),
+    "dark": dict(bg="#1e2023", field="#2a2d32", text="#e5e7eb", muted="#9ca3af", border="#41464e",
+                 accent="#3b82f6", accent_hover="#2563eb", accent_press="#1d4ed8", hover="#323a4a",
+                 press="#1e3a8a", tab="#26292d", trough="#2f3338", scale_trough="#3a3f46",
+                 warn="#f59e0b", canvas="#2e3238", tip_bg="#2a2d32", tip_fg="#e5e7eb"),
+}
+THEMES = ("Light", "Dark", "System")
+P = dict(PALETTES["light"])    # the active palette (ui_kit.P[...]); changed by set_theme()
+ACCENT = "#2563eb"             # fixed accent for drawings that look fine on both themes
 UI_SIZES = (0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0)
 
 # Fonts: (family, size in px at 100%)
@@ -66,9 +70,13 @@ def window_dpi(root):
 class Scaler:
     """Applies `factor` = monitor DPI / 96 x the user's UI size to fonts, styles and the layout."""
 
-    def __init__(self, root, user_scale=1.0):
+    def __init__(self, root, user_scale=1.0, theme="Light"):
         self.root = root
         self.user_scale = user_scale
+        self.theme_name = theme
+        resolved = system_theme() if theme.lower() == "system" else theme.lower()
+        P.clear()
+        P.update(PALETTES.get(resolved, PALETTES["light"]))
         self.dpi = window_dpi(root)
         self.factor = self.dpi / 96 * user_scale
         self.listeners = []           # callables run after the factor changes (e.g. redraw)
@@ -168,17 +176,60 @@ class Scaler:
         self.factor = new
         self._apply_fonts_and_styles()
         self.refresh()
+        self._relayout_text(self.root)
         for fn in self.listeners:
             fn()
+
+    def retheme(self):
+        """Palette changed: restyle everything and tell listeners (e.g. redraw the preview)."""
+        style_theme(self.root, self.px)
+        self.dark_title_bars()
+        self._relayout_text(self.root)
+        for fn in self.listeners:
+            fn()
+
+    def is_dark(self):
+        return P["bg"] == PALETTES["dark"]["bg"]
+
+    def dark_title_bars(self, win=None):
+        for w in ([win] if win else [self.root] + [t for t in _toplevels(self.root)]):
+            dark_title_bar(w, self.is_dark())
+
+    def _relayout_text(self, w):
+        """ttk entries/comboboxes/spinboxes cache where their text is drawn and don't redo it when
+        a named font changes size (the text ends up clipped). Re-setting the font forces it."""
+        if w.winfo_class() in ("TEntry", "TCombobox", "TSpinbox"):
+            try:
+                w.configure(font=w.cget("font") or "TkTextFont")
+            except tk.TclError:
+                pass
+        for child in w.winfo_children():
+            self._relayout_text(child)
 
 
 S = None                       # the app's Scaler (set by init_scaling)
 
 
-def init_scaling(root, user_scale=1.0):
+def init_scaling(root, user_scale=1.0, theme="Light"):
     global S
-    S = Scaler(root, user_scale)
+    S = Scaler(root, user_scale, theme)
+    root.after(50, S.dark_title_bars)     # needs the window to exist on screen
     return S
+
+
+def _toplevels(w):
+    for child in w.winfo_children():
+        if child.winfo_class() == "Toplevel":
+            yield child
+        yield from _toplevels(child)
+
+
+def adopt(win):
+    """Call after creating a dialog window: scales its spacing and applies the theme."""
+    if S:
+        S.refresh(win)
+        recolor(win)
+        win.after(50, lambda: S.dark_title_bars(win))
 
 
 def px(n):
@@ -199,83 +250,159 @@ def _ints(v):
 
 
 def style_theme(root, px):
-    """A clean, light theme drawn by Tk (based on 'clam'), sized by px()."""
+    """A clean theme drawn by Tk (based on 'clam') in the active palette P, sized by px()."""
     st = ttk.Style(root)
     st.theme_use("clam")
-    root.configure(background=BG)
-    st.configure(".", background=BG, foreground=TEXT, bordercolor=BORDER, lightcolor=BG, darkcolor=BG,
-                 troughcolor="#e5e7eb", focuscolor=ACCENT, selectbackground=ACCENT, selectforeground="white",
-                 fieldbackground=FIELD, insertcolor=TEXT, font="TkDefaultFont")
-    st.configure("TFrame", background=BG)
-    st.configure("TLabel", background=BG, foreground=TEXT)
-    st.configure("Hint.TLabel", foreground=MUTED, font="AppSmall")
-    st.configure("Warn.TLabel", foreground=WARN)
-    st.configure("Section.TLabel", foreground=ACCENT, font="AppSection")
+    bg, field, text, muted, border = P["bg"], P["field"], P["text"], P["muted"], P["border"]
+    accent, hover, press, tab = P["accent"], P["hover"], P["press"], P["tab"]
+    root.configure(background=bg)
+    st.configure(".", background=bg, foreground=text, bordercolor=border, lightcolor=bg, darkcolor=bg,
+                 troughcolor=P["trough"], focuscolor=accent, selectbackground=accent, selectforeground="white",
+                 fieldbackground=field, insertcolor=text, font="TkDefaultFont")
+    st.map(".", foreground=[("disabled", muted)])
+    st.configure("TFrame", background=bg)
+    st.configure("TLabel", background=bg, foreground=text)
+    st.configure("Hint.TLabel", foreground=muted, font="AppSmall")
+    st.configure("Warn.TLabel", foreground=P["warn"])
+    st.configure("Section.TLabel", foreground=accent, font="AppSection")
     st.configure("Title.TLabel", font="AppTitle")
-    st.configure("TLabelframe", background=BG, bordercolor=BORDER, relief="solid", borderwidth=1)
-    st.configure("TLabelframe.Label", background=BG, foreground=ACCENT, font="AppSection")
-    st.configure("TButton", background=FIELD, foreground=TEXT, bordercolor=BORDER, relief="flat",
-                 padding=(px(12), px(5)), lightcolor=FIELD, darkcolor=FIELD, focusthickness=1)
-    st.map("TButton", background=[("pressed", "#dbe4ff"), ("active", "#eef2ff"), ("disabled", BG)],
-           bordercolor=[("active", ACCENT), ("focus", ACCENT)], foreground=[("disabled", MUTED)])
+    st.configure("TLabelframe", background=bg, bordercolor=border, relief="solid", borderwidth=1)
+    st.configure("TLabelframe.Label", background=bg, foreground=accent, font="AppSection")
+    st.configure("TButton", background=field, foreground=text, bordercolor=border, relief="flat",
+                 padding=(px(12), px(5)), lightcolor=field, darkcolor=field, focusthickness=1)
+    st.map("TButton", background=[("pressed", press), ("active", hover), ("disabled", bg)],
+           bordercolor=[("active", accent), ("focus", accent)], foreground=[("disabled", muted)])
     st.configure("Big.TButton", padding=(px(16), px(7)))
-    st.configure("Accent.TButton", background=ACCENT, foreground="white", bordercolor=ACCENT,
-                 lightcolor=ACCENT, darkcolor=ACCENT, padding=(px(18), px(7)), font="AppBold")
-    st.map("Accent.TButton", background=[("pressed", "#1e40af"), ("active", ACCENT_DARK)],
-           lightcolor=[("active", ACCENT_DARK)], darkcolor=[("active", ACCENT_DARK)],
-           bordercolor=[("active", ACCENT_DARK)])
-    st.configure("TMenubutton", background=FIELD, bordercolor=BORDER, padding=(px(10), px(4)),
-                 arrowsize=px(9), relief="flat")
-    st.map("TMenubutton", background=[("active", "#eef2ff")])
+    st.configure("Tool.TButton", padding=(px(8), px(4)), width=-3)   # compact (min 3 chars, not 11)
+    st.configure("Accent.TButton", background=accent, foreground="white", bordercolor=accent,
+                 lightcolor=accent, darkcolor=accent, padding=(px(18), px(7)), font="AppBold")
+    st.map("Accent.TButton", background=[("pressed", P["accent_press"]), ("active", P["accent_hover"])],
+           lightcolor=[("active", P["accent_hover"])], darkcolor=[("active", P["accent_hover"])],
+           bordercolor=[("active", P["accent_hover"])])
+    st.configure("TMenubutton", background=field, foreground=text, bordercolor=border, padding=(px(10), px(4)),
+                 arrowsize=px(9), arrowcolor=text, relief="flat")
+    st.map("TMenubutton", background=[("active", hover)])
     for w in ("TCheckbutton", "TRadiobutton"):
-        st.configure(w, background=BG, indicatorbackground=FIELD, indicatorforeground=ACCENT,
+        st.configure(w, background=bg, foreground=text, indicatorbackground=field, indicatorforeground=accent,
                      indicatorsize=px(15), indicatordiameter=px(15), indicatormargin=(0, 0, px(6), 0),
-                     upperbordercolor=BORDER, lowerbordercolor=BORDER, padding=(px(2), px(3)))
-        st.map(w, indicatorbackground=[("disabled", BG), ("pressed", "#dbe4ff"), ("selected", FIELD)],
-               background=[("active", BG)], foreground=[("disabled", MUTED)])
+                     upperbordercolor=border, lowerbordercolor=border, padding=(px(2), px(3)))
+        st.map(w, indicatorbackground=[("disabled", bg), ("pressed", press), ("selected", field)],
+               background=[("active", bg)], foreground=[("disabled", muted)])
     for w in ("TEntry", "TCombobox", "TSpinbox"):
-        st.configure(w, fieldbackground=FIELD, bordercolor=BORDER, lightcolor=FIELD, darkcolor=FIELD,
-                     padding=(px(6), px(3)), arrowsize=px(13), arrowcolor=TEXT)
-        st.map(w, bordercolor=[("focus", ACCENT)], fieldbackground=[("readonly", FIELD), ("disabled", BG)],
-               foreground=[("disabled", MUTED)])
-    root.option_add("*TCombobox*Listbox.font", "TkDefaultFont")
-    st.configure("TNotebook", background=BG, bordercolor=BORDER, tabmargins=(0, px(2), 0, 0))
-    st.configure("TNotebook.Tab", background="#e5e7eb", foreground=MUTED, bordercolor=BORDER,
-                 padding=(px(14), px(6)), lightcolor="#e5e7eb")
-    st.map("TNotebook.Tab", background=[("selected", BG)], foreground=[("selected", TEXT)],
-           lightcolor=[("selected", BG)], expand=[("selected", (0, px(2), 0, 0))])
-    st.configure("Vertical.TScrollbar", arrowsize=px(14), background="#e5e7eb", bordercolor=BG,
-                 troughcolor=BG, gripcount=0, arrowcolor=MUTED)
-    st.configure("Horizontal.TScrollbar", arrowsize=px(14), background="#e5e7eb", bordercolor=BG,
-                 troughcolor=BG, gripcount=0, arrowcolor=MUTED)
-    st.configure("Horizontal.TScale", sliderlength=px(18), sliderthickness=px(16), troughcolor="#dbe2ea",
-                 background=FIELD, bordercolor=BORDER)
-    st.map("Horizontal.TScale", background=[("active", "#eef2ff")])
-    st.configure("Horizontal.TProgressbar", thickness=px(10), background=ACCENT, troughcolor="#e5e7eb",
-                 bordercolor=BORDER)
-    st.configure("Treeview", rowheight=px(26), fieldbackground=FIELD, background=FIELD, bordercolor=BORDER)
-    st.configure("Treeview.Heading", font="TkHeadingFont", padding=(px(6), px(4)), background="#e5e7eb")
-    st.configure("TSeparator", background=BORDER)
-    st.configure("TPanedwindow", background=BG)
-    st.configure("Sash", sashthickness=px(6), gripcount=0, background=BG)
-    root.option_add("*Listbox.font", "TkDefaultFont")
-    root.option_add("*Listbox.background", FIELD)
-    root.option_add("*Listbox.selectBackground", ACCENT)
-    root.option_add("*Listbox.selectForeground", "white")
-    root.option_add("*Listbox.activeStyle", "none")
-    root.option_add("*Listbox.borderWidth", 0)
-    root.option_add("*Listbox.highlightThickness", 1)
-    root.option_add("*Listbox.highlightColor", ACCENT)
-    root.option_add("*Listbox.highlightBackground", BORDER)
-    root.option_add("*Text.font", "TkDefaultFont")
-    root.option_add("*Menu.font", "TkMenuFont")
+        st.configure(w, fieldbackground=field, foreground=text, bordercolor=border, lightcolor=field,
+                     darkcolor=field, padding=(px(6), px(3)), arrowsize=px(13), arrowcolor=text,
+                     background=field, insertcolor=text, selectbackground=accent, selectforeground="white")
+        st.map(w, bordercolor=[("focus", accent)], fieldbackground=[("readonly", field), ("disabled", bg)],
+               foreground=[("disabled", muted), ("readonly", text)], background=[("active", hover)],
+               selectbackground=[("readonly", field)], selectforeground=[("readonly", text)])
+    st.configure("TNotebook", background=bg, bordercolor=border, tabmargins=(0, px(2), 0, 0))
+    st.configure("TNotebook.Tab", background=tab, foreground=muted, bordercolor=border,
+                 padding=(px(14), px(6)), lightcolor=tab)
+    st.map("TNotebook.Tab", background=[("selected", bg)], foreground=[("selected", text)],
+           lightcolor=[("selected", bg)], expand=[("selected", (0, px(2), 0, 0))])
+    for o in ("Vertical", "Horizontal"):
+        st.configure(f"{o}.TScrollbar", arrowsize=px(14), background=tab, bordercolor=bg, troughcolor=bg,
+                     gripcount=0, arrowcolor=muted, lightcolor=tab, darkcolor=tab)
+        st.map(f"{o}.TScrollbar", background=[("active", hover)])
+    st.configure("Horizontal.TScale", sliderlength=px(18), sliderthickness=px(16), troughcolor=P["scale_trough"],
+                 background=field, bordercolor=border, lightcolor=field, darkcolor=field)
+    st.map("Horizontal.TScale", background=[("active", hover)])
+    st.configure("Horizontal.TProgressbar", thickness=px(10), background=accent, troughcolor=P["trough"],
+                 bordercolor=border, lightcolor=accent, darkcolor=accent)
+    st.configure("Treeview", rowheight=px(26), fieldbackground=field, background=field, foreground=text,
+                 bordercolor=border)
+    st.map("Treeview", background=[("selected", accent)], foreground=[("selected", "white")])
+    st.configure("Treeview.Heading", font="TkHeadingFont", padding=(px(6), px(4)), background=tab,
+                 foreground=text, bordercolor=border)
+    st.configure("TSeparator", background=border)
+    st.configure("TPanedwindow", background=bg)
+    st.configure("Sash", sashthickness=px(6), gripcount=0, background=bg)
+    # Plain Tk widgets (lists, text boxes, menus) created from now on:
+    for pattern, value in (("*Listbox.font", "TkDefaultFont"), ("*Listbox.background", field),
+                           ("*Listbox.foreground", text), ("*Listbox.selectBackground", accent),
+                           ("*Listbox.selectForeground", "white"), ("*Listbox.activeStyle", "none"),
+                           ("*Listbox.borderWidth", 0), ("*Listbox.highlightThickness", 1),
+                           ("*Listbox.highlightColor", accent), ("*Listbox.highlightBackground", border),
+                           ("*TCombobox*Listbox.font", "TkDefaultFont"),
+                           ("*Text.font", "TkDefaultFont"), ("*Text.background", field),
+                           ("*Text.foreground", text), ("*Text.insertBackground", text),
+                           ("*Menu.font", "TkMenuFont"), ("*Menu.background", field), ("*Menu.foreground", text),
+                           ("*Menu.activeBackground", accent), ("*Menu.activeForeground", "white"),
+                           # small built-in dialogs (e.g. "Save as material…") are plain Tk widgets
+                           ("*Toplevel.background", bg), ("*Frame.background", bg),
+                           ("*Label.background", bg), ("*Label.foreground", text),
+                           ("*Entry.background", field), ("*Entry.foreground", text),
+                           ("*Entry.insertBackground", text), ("*Button.background", field),
+                           ("*Button.foreground", text), ("*Button.activeBackground", hover),
+                           ("*Button.activeForeground", text)):
+        root.option_add(pattern, value)
+    recolor(root)
+
+
+def recolor(w):
+    """Applies the palette to plain Tk widgets that already exist (ttk ones follow the style)."""
+    cls = w.winfo_class()
+    try:
+        if cls == "Listbox":
+            w.configure(background=P["field"], foreground=P["text"], selectbackground=P["accent"],
+                        selectforeground="white", highlightbackground=P["border"], highlightcolor=P["accent"])
+        elif cls == "Text":
+            w.configure(background=P["field"], foreground=P["text"], insertbackground=P["text"],
+                        highlightbackground=P["border"], highlightcolor=P["accent"])
+        elif cls == "Menu":
+            w.configure(background=P["field"], foreground=P["text"], activebackground=P["accent"],
+                        activeforeground="white")
+        elif cls == "Canvas":
+            # Settings pages blend with the window; the preview canvas uses the preview color.
+            w.configure(background=P["bg"] if isinstance(w.master, ScrollTab) else P["canvas"])
+        elif cls in ("Tk", "Toplevel"):
+            w.configure(background=P["bg"])
+    except tk.TclError:
+        pass
+    for child in w.winfo_children():
+        recolor(child)
+
+
+def system_theme():
+    """'dark' if Windows apps are set to dark mode, else 'light'."""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as k:
+            return "light" if winreg.QueryValueEx(k, "AppsUseLightTheme")[0] else "dark"
+    except OSError:
+        return "light"
+
+
+def dark_title_bar(win, dark):
+    """Dark or light Windows title bar (Windows 10 20H1+ / 11; ignored elsewhere)."""
+    try:
+        hwnd = ctypes.windll.user32.GetAncestor(win.winfo_id(), 2)
+        value = ctypes.c_int(1 if dark else 0)
+        for attr in (20, 19):            # DWMWA_USE_IMMERSIVE_DARK_MODE (newer, older builds)
+            if ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(value),
+                                                         ctypes.sizeof(value)) == 0:
+                break
+    except Exception:
+        pass
+
+
+def set_theme(name):
+    """'Light', 'Dark' or 'System'. Re-themes every open window."""
+    resolved = system_theme() if name.lower() == "system" else name.lower()
+    P.clear()
+    P.update(PALETTES.get(resolved, PALETTES["light"]))
+    if S:
+        S.theme_name = name
+        S.retheme()
+    return resolved
 
 
 def apply_theme(root):
     """Kept for compatibility: the theme is applied by the Scaler."""
     if S is None:
         init_scaling(root)
-    return BG
+    return P["bg"]
 
 
 class Tooltip:
@@ -292,7 +419,7 @@ class Tooltip:
         self.tip = tk.Toplevel(self.widget)
         self.tip.wm_overrideredirect(True)
         self.tip.wm_geometry(f"+{x}+{y}")
-        tk.Label(self.tip, text=self.text, background="#fffbe6", foreground=TEXT, relief="solid",
+        tk.Label(self.tip, text=self.text, background=P["tip_bg"], foreground=P["tip_fg"], relief="solid",
                  borderwidth=1, padx=px(8), pady=px(5), justify="left", font="AppSmall").pack()
 
     def hide(self, _):
@@ -307,7 +434,7 @@ class ScrollTab(ttk.Frame):
 
     def __init__(self, nb, padding=(12, 10)):
         super().__init__(nb)
-        self.canvas = tk.Canvas(self, highlightthickness=0, borderwidth=0, background=BG)
+        self.canvas = tk.Canvas(self, highlightthickness=0, borderwidth=0, background=P["bg"])
         sb = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
         self.canvas.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y")

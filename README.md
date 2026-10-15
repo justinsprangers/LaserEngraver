@@ -85,12 +85,19 @@ end; cutting time is the total cut-line length at the cut speed. It ignores acce
 multiple passes, so real jobs usually take somewhat longer. In Design mode the engraving part
 updates when you look at the Design view.
 
-## Screen size and scaling
+## Theme, screen size and scaling
 
-The app sizes itself for the monitor it's on (Windows display scaling) and re-adjusts when you
-drag it to a monitor with different scaling. **UI size** (top right, 80-200%, also Ctrl+= /
-Ctrl+-) makes everything bigger or smaller on top of that, for example on a high-resolution
-screen that Windows runs at 100%. It's remembered between sessions.
+**⚙ View** (top right) holds:
+- **Theme:** Light, Dark, or System (follows your Windows app setting). Dark also darkens the
+  window's title bar.
+- **UI size:** 80-200%, also Ctrl+= / Ctrl+-. Makes everything bigger or smaller, for example
+  on a high-resolution screen that Windows runs at 100%.
+
+Both are remembered between sessions. The app also sizes itself for the monitor it's on
+(Windows display scaling) and re-adjusts when you drag it to a monitor with different scaling.
+
+The output folder (**Save to**, with **Change…** and **Open folder**) is at the bottom, above
+the Save buttons.
 
 ## Keyboard shortcuts
 
@@ -129,7 +136,7 @@ exports a single engraving, so you don't need Inkscape for the layout step.
 
 1. **Design** tab: set the canvas size (your material), material, DPI, invert, mirror, and
    whether to save a cut outline.
-2. **Add ▾** (Layers panel): Photo, Logo / clip art (PNG), SVG, Text, Arc text, Rectangle,
+2. **Add** (Layers panel): Photo, Logo / clip art (PNG), SVG, Text, Arc text, Rectangle,
    Circle / ellipse, Line.
 3. Arrange on the **Layout** view: it's fast because photos are shown as plain pictures. Switch
    to the **Design** view to see the real engraving; it only renders when you look at it.
