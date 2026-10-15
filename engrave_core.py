@@ -25,7 +25,7 @@ import os
 import sys
 from dataclasses import dataclass, asdict, fields
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 # Where things live. Running from source, everything is in this folder. As an installed app
 # (PyInstaller sets sys.frozen), the program folder is read-only, so user data goes to
@@ -181,21 +181,93 @@ def load_image(path):
 _rembg_session = None
 
 
-def remove_background(path):
-    """AI subject cut-out. Returns (grayscale on white, alpha mask). Slow: ~1-5 s per photo."""
+def ai_cutout(path):
+    """AI subject cut-out (u2net via rembg). Returns (RGB image, alpha mask). ~1-5 s per photo."""
     global _rembg_session
     from rembg import new_session, remove      # imported here: heavy, and only needed for this
     if _rembg_session is None:
         _rembg_session = new_session("u2net")
     img = ImageOps.exif_transpose(Image.open(path)).convert("RGB")
-    cut = remove(img, session=_rembg_session)
-    return _flatten_on_white(cut).convert("L"), cut.split()[-1]
+    return img, remove(img, session=_rembg_session).split()[-1]
 
 
-def load_source(path, remove_bg=False):
+def compose_on_white(rgb, alpha):
+    """Subject over a white background, as grayscale (what the engraving pipeline uses)."""
+    return _flatten_on_white(Image.merge("RGBA", (*rgb.split(), alpha))).convert("L")
+
+
+# --- Feedback fixes ---------------------------------------------------------
+# A "stroke" is (kind, radius, [(x, y), ...]) in source-image pixels; kind is "keep" or "remove".
+# refine_alpha() re-segments the image using the strokes as labeled training pixels:
+# GrabCut fits Gaussian color models for subject vs. background (seeded by the AI's guess
+# plus your strokes) and solves a graph cut. Only wrong regions you touched are changed.
+
+def _rasterize(strokes, shape, scale=1.0):
+    """Masks (keep, remove) with the strokes painted in, at the given scale."""
+    keep, remove = np.zeros(shape, np.uint8), np.zeros(shape, np.uint8)
+    for kind, radius, pts in strokes:
+        target = keep if kind == "keep" else remove
+        r = max(1, int(round(radius * scale)))
+        p = np.round(np.array(pts, np.float32) * scale).astype(np.int32)
+        if len(p) == 1:
+            cv2.circle(target, tuple(int(v) for v in p[0]), r, 1, -1)
+        else:
+            cv2.polylines(target, [p.reshape(-1, 1, 2)], False, 1, thickness=2 * r, lineType=cv2.LINE_8)
+            for q in (p[0], p[-1]):
+                cv2.circle(target, tuple(int(v) for v in q), r, 1, -1)
+    return keep.astype(bool), remove.astype(bool)
+
+
+def refine_alpha(rgb, alpha, strokes, max_side=400, iterations=4):
+    """Corrected alpha mask from the AI mask plus feedback strokes."""
+    if not strokes:
+        return alpha
+    W, H = rgb.size
+    k = min(1.0, max_side / max(W, H))
+    w, h = max(1, round(W * k)), max(1, round(H * k))
+    img = cv2.cvtColor(np.array(rgb.resize((w, h), Image.Resampling.BILINEAR)), cv2.COLOR_RGB2BGR)
+    a0 = np.array(alpha.resize((w, h), Image.Resampling.BILINEAR)) >= 128
+    keep, remove = _rasterize(strokes, (h, w), k)
+
+    mask = np.where(a0, cv2.GC_PR_FGD, cv2.GC_PR_BGD).astype(np.uint8)
+    mask[keep] = cv2.GC_FGD
+    mask[remove] = cv2.GC_BGD
+    if (mask == cv2.GC_FGD).sum() + (mask == cv2.GC_PR_FGD).sum() == 0 or \
+       (mask == cv2.GC_BGD).sum() + (mask == cv2.GC_PR_BGD).sum() == 0:
+        fg = keep | (a0 & ~remove)                # nothing to learn from on one side
+    else:
+        bgd, fgd = np.zeros((1, 65), np.float64), np.zeros((1, 65), np.float64)
+        cv2.setRNGSeed(0)       # same strokes -> same result (preview matches the saved file)
+        cv2.grabCut(img, mask, None, bgd, fgd, iterations, cv2.GC_INIT_WITH_MASK)
+        fg = (mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD)
+        # Accept only changed regions that a stroke touches, so untouched areas stay put.
+        changed = (fg != a0).astype(np.uint8)
+        n, labels = cv2.connectedComponents(changed, connectivity=8)
+        near = cv2.dilate((keep | remove).astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
+        touched = np.unique(labels[near & (changed > 0)])
+        accept = np.isin(labels, touched[touched > 0])
+        fg = np.where(accept, fg, a0)
+
+    # Back to full size. Keep the AI's soft edges wherever it already agreed.
+    fg_full = cv2.resize(fg.astype(np.float32), (W, H), interpolation=cv2.INTER_LINEAR) >= 0.5
+    A = np.array(alpha)
+    out = np.where(fg_full, np.where(A >= 128, A, 255), np.where(A < 128, A, 0)).astype(np.uint8)
+    keep_f, remove_f = _rasterize(strokes, (H, W))
+    out[keep_f], out[remove_f] = 255, 0           # strokes are always obeyed exactly
+    return Image.fromarray(out)
+
+
+def remove_background(path, strokes=None):
+    """(grayscale on white, alpha mask), with feedback strokes applied if given."""
+    rgb, alpha = ai_cutout(path)
+    alpha = refine_alpha(rgb, alpha, strokes or [])
+    return compose_on_white(rgb, alpha), alpha
+
+
+def load_source(path, remove_bg=False, strokes=None):
     """(grayscale, alpha or None). alpha marks the subject when the background was removed."""
     if remove_bg:
-        return remove_background(path)
+        return remove_background(path, strokes)
     return load_image(path), None
 
 
@@ -505,9 +577,9 @@ def save_outputs(path, out_dir, s, gray, result, mask, comparison=False):
     return out_path
 
 
-def process_file(path, out_dir, s, comparison=False):
+def process_file(path, out_dir, s, comparison=False, strokes=None):
     """Runs the full pipeline on one file and returns the output path."""
-    src, alpha = load_source(path, s.remove_bg)
+    src, alpha = load_source(path, s.remove_bg, strokes)
     gray, result, mask = render(src, alpha, s)
     return save_outputs(path, out_dir, s, gray, result, mask, comparison)
 
@@ -568,8 +640,8 @@ def test_card(src, alpha, s, tile_in=1.0):
     return ImageOps.mirror(out) if s.mirror else out
 
 
-def save_test_card(path, out_dir, s):
-    src, alpha = load_source(path, s.remove_bg)
+def save_test_card(path, out_dir, s, strokes=None):
+    src, alpha = load_source(path, s.remove_bg, strokes)
     card = test_card(src, alpha, s)
     os.makedirs(out_dir, exist_ok=True)
     base = os.path.splitext(os.path.basename(path))[0]

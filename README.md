@@ -79,6 +79,28 @@ the engraving needs, meaning it will be upscaled and lose some sharpness.
   on every side, so center the two on each other in your laser software.
 - `..._preview.jpg` (if *Also save side-by-side preview JPG* is ticked): adjusted vs. final.
 
+## Fixing the background removal
+
+When **Remove background** is on, a *Fix cut-out* toolbar appears above the preview, along with
+the **Cut-out** view: your photo in color, with removed areas tinted red.
+
+1. Pick **Keep ✚** and paint over parts of the subject that were wrongly removed, or pick
+   **Remove ✖** and paint over background that was wrongly kept. (Choosing a tool switches to
+   the Cut-out view.)
+2. Let go of the mouse. It re-evaluates in a second or two.
+3. Repeat where needed. **Undo** removes the last stroke; **Clear fixes** removes them all.
+   Right-drag pans in any tool; the mouse wheel zooms.
+
+How it works: the AI (u2net) makes the first cut. Your strokes act as labeled examples of
+"subject" and "background". GrabCut learns a color model for each from them (Gaussian mixture
+models) and re-cuts the image with a graph cut, so one stroke fixes the whole wrong region, not
+just the pixels you painted. Only regions your strokes touch change, so the rest stays as it was.
+A region in a very different color (e.g. a white rim next to a black visor) may need its own stroke.
+
+Fixes are saved per image (`fixes.json`, next to `settings.json`) and used by Save, Process all and
+the test card. If the image file changes, its fixes are dropped. Learning happens per image: fixes
+on one photo don't teach the AI anything about the next.
+
 ## Test card
 
 **Make test card** (Basic tab) saves a 3×3 grid: one inch of the selected image at true engraving

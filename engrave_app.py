@@ -26,7 +26,9 @@ DEFAULT_OUT = core.DEFAULT_OUT
 ICON = os.path.join(core.HERE, "icon.ico")
 DPI_CHOICES = ("254", "318", "423", "508")   # 0.10, 0.08, 0.06, 0.05 mm line interval
 ZOOMS = ("Fit", "25%", "50%", "100%", "200%", "400%")
-VIEWS = ("Original", "Adjusted", "Engraving", "Material look")
+VIEWS = ("Original", "Cut-out", "Adjusted", "Engraving", "Material look")
+FIXES_FILE = os.path.join(core.DATA_DIR, "fixes.json")
+STROKE_COLORS = {"keep": "#22c55e", "remove": "#ef4444"}
 DEBOUNCE_MS = 300
 
 TIPS = {
@@ -81,7 +83,15 @@ class App:
         self.root = root
         self.materials = core.load_materials()
         self.files = []
-        self.src_cache = {}         # (path, remove_bg) -> (grayscale source, alpha or None)
+        self.src_cache = {}         # path -> grayscale source (no background removal)
+        self.ai_cache = {}          # path -> (RGB, AI alpha)
+        self.refined = {}           # path -> (strokes key, grayscale on white, corrected alpha)
+        self.fixes = self._load_fixes()   # path -> list of feedback strokes
+        self.tool = tk.StringVar(value="pan")
+        self.brush = tk.IntVar(value=24)
+        self.live = None            # stroke being drawn: (kind, [canvas points], [src points], item)
+        self.disp = None            # (scale, x0, y0, view->source factor) of the drawn image
+        self.view_factor = {}       # view name -> source pixels per view pixel (Cut-out is downsized)
         self.views = {}             # view name -> PIL image for the current file
         self.gen = 0                # bumps on every change; stale results are dropped
         self.pending = None
@@ -233,8 +243,27 @@ class App:
         zc.bind("<<ComboboxSelected>>", lambda e: self.redraw())
         ttk.Label(bar, text="Zoom").pack(side="right", padx=4)
 
+        # Fix tools: shown only while Remove background is on.
+        self.fixbar = ttk.Frame(right)
+        ttk.Label(self.fixbar, text="Fix cut-out:").pack(side="left")
+        for label, val in (("Pan", "pan"), ("Keep ✚", "keep"), ("Remove ✖", "remove")):
+            ttk.Radiobutton(self.fixbar, text=label, value=val, variable=self.tool,
+                            command=self.on_tool).pack(side="left", padx=(6, 0))
+        ttk.Label(self.fixbar, text="Brush").pack(side="left", padx=(14, 4))
+        ttk.Scale(self.fixbar, from_=6, to=100, variable=self.brush, length=110).pack(side="left")
+        ttk.Button(self.fixbar, text="Undo", command=self.undo_stroke).pack(side="left", padx=(14, 4))
+        ttk.Button(self.fixbar, text="Clear fixes", command=self.clear_fixes).pack(side="left")
+        self.fix_hint = ttk.Label(self.fixbar, text="", style="Hint.TLabel")
+        self.fix_hint.pack(side="left", padx=10)
+        Tooltip(self.fix_hint, "Keep: paint on parts of the subject that were wrongly removed.\n"
+                               "Remove: paint on background that was wrongly kept.\n"
+                               "When you let go, it re-learns subject vs. background colors from\n"
+                               "your strokes and re-cuts the whole wrong region, not just the paint.\n"
+                               "Right-drag pans in any tool. Fixes are saved per image.")
+
         cf = ttk.Frame(right)
         cf.pack(fill="both", expand=True)
+        self.canvas_frame = cf
         self.canvas = tk.Canvas(cf, background="#808080", highlightthickness=0, cursor="fleur")
         xs = ttk.Scrollbar(cf, orient="horizontal", command=self.canvas.xview)
         ys = ttk.Scrollbar(cf, orient="vertical", command=self.canvas.yview)
@@ -244,8 +273,11 @@ class App:
         xs.grid(row=1, column=0, sticky="ew")
         cf.rowconfigure(0, weight=1)
         cf.columnconfigure(0, weight=1)
-        self.canvas.bind("<ButtonPress-1>", lambda e: self.canvas.scan_mark(e.x, e.y))
-        self.canvas.bind("<B1-Motion>", lambda e: self.canvas.scan_dragto(e.x, e.y, gain=1))
+        self.canvas.bind("<ButtonPress-1>", self.on_press)
+        self.canvas.bind("<B1-Motion>", self.on_drag)
+        self.canvas.bind("<ButtonRelease-1>", self.on_release)
+        self.canvas.bind("<ButtonPress-3>", lambda e: self.canvas.scan_mark(e.x, e.y))
+        self.canvas.bind("<B3-Motion>", lambda e: self.canvas.scan_dragto(e.x, e.y, gain=1))
         self.canvas.bind("<Configure>", lambda e: self.zoom.get() == "Fit" and self.redraw())
         self.canvas.bind("<MouseWheel>", self.on_wheel)
 
@@ -466,7 +498,7 @@ class App:
         self.set_status("Making test card…")
         self.root.update_idletasks()
         try:
-            out = core.save_test_card(path, self.out_dir.get(), s)
+            out = core.save_test_card(path, self.out_dir.get(), s, self.fixes.get(path))
         except Exception as e:
             messagebox.showerror("Test card failed", str(e))
             return
@@ -574,12 +606,12 @@ class App:
         photo = s.style == "photo"
         self.dither_combo.state(["!disabled"] if photo else ["disabled"])
         self.dither_hint.configure(foreground="#666" if photo else "#bbb")
+        self.update_fixbar()
         path = self.current_file()
-        cached = self.src_cache.get((path, s.remove_bg))
-        if cached is None:
+        src = self.src_cache.get(path) or (self.ai_cache.get(path) or (None,))[0]
+        if src is None:
             self.height_lbl.configure(text="")
             return
-        src = cached[0]
         w, h = s.output_size(src.width, src.height)
         self.height_lbl.configure(text=f"→ {h / s.dpi:.2f} in tall")
 
@@ -595,24 +627,49 @@ class App:
         if s is None:
             return
         gen = self.gen
-        slow = s.remove_bg and (path, True) not in self.src_cache
-        self.set_status("Removing background…" if slow else "Updating preview…")
-        self.worker.submit(self._preview_job, gen, path, s)
+        strokes = list(self.fixes.get(path, []))
+        if not s.remove_bg:
+            msg = "Updating preview…"
+        elif path not in self.ai_cache:
+            msg = "Removing background…"
+        elif self.refined.get(path, (None,))[0] != repr(strokes):
+            msg = "Re-evaluating cut-out from your fixes…"
+        else:
+            msg = "Updating preview…"
+        self.set_status(msg)
+        self.worker.submit(self._preview_job, gen, path, s, strokes)
 
-    def _preview_job(self, gen, path, s):
+    @staticmethod
+    def _remember(cache, key, value, limit=6):
+        if len(cache) >= limit and key not in cache:     # big photos are ~12 MB each in memory
+            cache.pop(next(iter(cache)))
+        cache[key] = value
+
+    def _preview_job(self, gen, path, s, strokes):
         try:
-            key = (path, s.remove_bg)
-            cached = self.src_cache.get(key)
-            if cached is None:
-                cached = core.load_source(path, s.remove_bg)
-                if len(self.src_cache) >= 6:      # big photos are ~12 MB each in memory
-                    self.src_cache.pop(next(iter(self.src_cache)))
-                self.src_cache[key] = cached
+            cutout = None
+            if s.remove_bg:
+                if path not in self.ai_cache:
+                    self._remember(self.ai_cache, path, core.ai_cutout(path), limit=4)
+                rgb, a0 = self.ai_cache[path]
+                key = repr(strokes)
+                ref = self.refined.get(path)
+                if ref is None or ref[0] != key:
+                    alpha = core.refine_alpha(rgb, a0, strokes)
+                    ref = (key, core.compose_on_white(rgb, alpha), alpha)
+                    self._remember(self.refined, path, ref, limit=4)
+                _, src, alpha = ref
+                cutout = self._cutout_view(rgb, alpha)
+            else:
+                src = self.src_cache.get(path)
+                if src is None:
+                    src = core.load_image(path)
+                    self._remember(self.src_cache, path, src)
+                alpha = None
             if gen != self.gen:
                 return
-            src, alpha = cached
             gray, result, mask = core.render(src, alpha, s)
-            self.results.put(("preview", gen, path, s, src, gray, result, mask))
+            self.results.put(("preview", gen, path, s, src, gray, result, mask, cutout))
         except Exception as e:
             self.results.put(("error", gen, f"Could not process {os.path.basename(path)}:\n{e}"))
 
@@ -622,10 +679,10 @@ class App:
                 msg = self.results.get_nowait()
                 kind = msg[0]
                 if kind == "preview":
-                    _, gen, path, s, src, gray, result, mask = msg
+                    _, gen, path, s, src, gray, result, mask, cutout = msg
                     if gen == self.gen:
                         self.last_mask = mask
-                        self.show_preview(path, s, src, gray, result)
+                        self.show_preview(path, s, src, gray, result, cutout)
                 elif kind == "error":
                     if msg[1] == self.gen:
                         self.set_status("")
@@ -646,7 +703,17 @@ class App:
             pass
         self.root.after(50, self._poll)
 
-    def show_preview(self, path, s, src, gray, result):
+    @staticmethod
+    def _cutout_view(rgb, alpha, max_side=1600):
+        """The photo in color with removed areas tinted red. Returns (image, view->source factor)."""
+        k = min(1.0, max_side / max(rgb.size))
+        size = (max(1, round(rgb.width * k)), max(1, round(rgb.height * k)))
+        im = rgb.resize(size, Image.Resampling.BILINEAR)
+        a = alpha.resize(size, Image.Resampling.BILINEAR)
+        tinted = Image.blend(im, Image.new("RGB", size, (190, 20, 20)), 0.6)
+        return Image.composite(im, tinted, a), rgb.width / size[0]
+
+    def show_preview(self, path, s, src, gray, result, cutout=None):
         self.last = (self.gen, path, s, gray, result)
         look = self.materials.get(s.material, {}).get("look", ["#ffffff", "#000000"])
         # Black pixels in the output = laser fires. Paint them in the burn color.
@@ -655,6 +722,11 @@ class App:
             material_look = ImageOps.mirror(material_look)   # show it as seen from the front
         self.views = {"Original": src, "Adjusted": gray, "Engraving": result,
                       "Material look": material_look}
+        self.view_factor = {}
+        if cutout:
+            self.views["Cut-out"], self.view_factor["Cut-out"] = cutout
+        else:
+            self.views["Cut-out"] = src      # nothing removed; just show the photo
         self.update_labels()
         w, h = result.size
         eff = src.width / s.width_in
@@ -690,6 +762,127 @@ class App:
         x0, y0 = max(0, (cw - dw) // 2), max(0, (ch - dh) // 2)
         self.canvas.create_image(x0, y0, image=self.photo, anchor="nw")
         self.canvas.configure(scrollregion=(0, 0, max(cw, dw), max(ch, dh)))
+        self.disp = (scale, x0, y0, self.view_factor.get(self.view.get(), 1.0))
+        if self.view.get() == "Cut-out" and self.vars["remove_bg"].get():
+            self._draw_strokes()
+
+    # ------------------------------------------------------- cut-out fixes
+
+    def _load_fixes(self):
+        """Saved strokes, dropping any whose image file changed since."""
+        try:
+            with open(FIXES_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return {}
+        out = {}
+        for path, entry in data.items():
+            try:
+                if os.path.getmtime(path) == entry["mtime"]:
+                    out[path] = [tuple(st) for st in entry["strokes"]]
+            except (OSError, KeyError, TypeError):
+                pass
+        return out
+
+    def _save_fixes(self):
+        data = {}
+        for path, strokes in self.fixes.items():
+            if strokes and os.path.exists(path):
+                data[path] = {"mtime": os.path.getmtime(path), "strokes": strokes}
+        try:
+            os.makedirs(os.path.dirname(FIXES_FILE), exist_ok=True)
+            with open(FIXES_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+        except OSError:
+            pass
+
+    def update_fixbar(self):
+        on = self.vars["remove_bg"].get()
+        if on and not self.fixbar.winfo_ismapped():
+            self.fixbar.pack(fill="x", pady=(0, 4), before=self.canvas_frame)
+        elif not on and self.fixbar.winfo_ismapped():
+            self.fixbar.pack_forget()
+            self.tool.set("pan")
+        n = len(self.fixes.get(self.current_file(), []))
+        self.fix_hint.configure(text=f"{n} fix{'es' if n != 1 else ''} on this image ⓘ")
+        self.canvas.configure(cursor="fleur" if self.tool.get() == "pan" else "crosshair")
+
+    def on_tool(self):
+        if self.tool.get() != "pan" and self.view.get() != "Cut-out":
+            self.view.set("Cut-out")
+            self.redraw()
+        self.update_fixbar()
+
+    def _drawing(self):
+        return (self.tool.get() != "pan" and self.view.get() == "Cut-out" and self.disp
+                and self.vars["remove_bg"].get() and self.current_file())
+
+    def _to_src(self, cx, cy):
+        scale, x0, y0, factor = self.disp
+        return ((cx - x0) / scale * factor, (cy - y0) / scale * factor)
+
+    def on_press(self, e):
+        if not self._drawing():
+            self.canvas.scan_mark(e.x, e.y)
+            return
+        cx, cy = self.canvas.canvasx(e.x), self.canvas.canvasy(e.y)
+        kind = self.tool.get()
+        w = self.brush.get()
+        item = self.canvas.create_line(cx, cy, cx + 0.1, cy + 0.1, fill=STROKE_COLORS[kind], width=w,
+                                       capstyle="round", joinstyle="round", stipple="gray50")
+        self.live = (kind, [cx, cy], [self._to_src(cx, cy)], item)
+
+    def on_drag(self, e):
+        if not self.live:
+            if not self._drawing():
+                self.canvas.scan_dragto(e.x, e.y, gain=1)
+            return
+        cx, cy = self.canvas.canvasx(e.x), self.canvas.canvasy(e.y)
+        kind, cpts, spts, item = self.live
+        if abs(cx - cpts[-2]) + abs(cy - cpts[-1]) < 3:
+            return
+        cpts += [cx, cy]
+        spts.append(self._to_src(cx, cy))
+        self.canvas.coords(item, *cpts)
+
+    def on_release(self, e):
+        if not self.live:
+            return
+        kind, _, spts, _ = self.live
+        self.live = None
+        scale, _, _, factor = self.disp
+        radius = round(self.brush.get() / 2 / scale * factor, 1)
+        stroke = (kind, radius, [(round(x, 1), round(y, 1)) for x, y in spts])
+        self.fixes.setdefault(self.current_file(), []).append(stroke)
+        self._fixes_changed()
+
+    def undo_stroke(self):
+        strokes = self.fixes.get(self.current_file())
+        if strokes:
+            strokes.pop()
+            self._fixes_changed()
+
+    def clear_fixes(self):
+        path = self.current_file()
+        if self.fixes.get(path) and messagebox.askyesno(
+                "Clear fixes", "Remove all background fixes on this image?"):
+            self.fixes.pop(path, None)
+            self._fixes_changed()
+
+    def _fixes_changed(self):
+        self._save_fixes()
+        self.update_fixbar()
+        self.on_change()
+
+    def _draw_strokes(self):
+        """Overlays saved strokes on the Cut-out view so you can see what you've marked."""
+        scale, x0, y0, factor = self.disp
+        for kind, radius, pts in self.fixes.get(self.current_file(), []):
+            c = [v for x, y in pts for v in (x0 + x / factor * scale, y0 + y / factor * scale)]
+            if len(c) == 2:
+                c += [c[0] + 0.1, c[1] + 0.1]
+            self.canvas.create_line(*c, fill=STROKE_COLORS[kind], width=max(2, 2 * radius / factor * scale),
+                                    capstyle="round", joinstyle="round", stipple="gray25")
 
     def on_wheel(self, e):
         i = ZOOMS.index(self.zoom.get())
@@ -712,7 +905,8 @@ class App:
                 out = core.save_outputs(path, self.out_dir.get(), s, gray, result,
                                         self.last_mask, self.comparison.get())
             else:
-                out = core.process_file(path, self.out_dir.get(), s, self.comparison.get())
+                out = core.process_file(path, self.out_dir.get(), s, self.comparison.get(),
+                                        self.fixes.get(path))
         except Exception as e:
             messagebox.showerror("Save failed", str(e))
             return
@@ -732,7 +926,8 @@ class App:
         done, ok, failed = 0, 0, []
         workers = max(1, min(4, (os.cpu_count() or 2) // 2))
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {pool.submit(core.process_file, f, out, s, comp): f for f in files}
+            futures = {pool.submit(core.process_file, f, out, s, comp, list(self.fixes.get(f, []))): f
+                       for f in files}
             for fut in futures:
                 name = os.path.basename(futures[fut])
                 err = None
@@ -786,12 +981,14 @@ def selftest(report_path):
     img = Image.fromarray(((xx + yy) % 256).astype(np.uint8)).convert("RGB")
     path = os.path.join(os.path.dirname(report_path), "selftest_input.png")
     img.save(path)
-    for label, kw in (("photo/stucki", {}), ("comic", {"style": "comic"}),
-                      ("remove background", {"remove_bg": True})):
+    fix = [("remove", 20, [(100, 100), (200, 150)])]
+    for label, kw, strokes in (("photo/stucki", {}, None), ("comic", {"style": "comic"}, None),
+                               ("remove background", {"remove_bg": True}, None),
+                               ("cut-out fix (GrabCut)", {"remove_bg": True}, fix)):
         t = time.time()
         try:
             s = core.Settings(width_in=2.0, **kw)
-            core.render(*core.load_source(path, s.remove_bg), s)
+            core.render(*core.load_source(path, s.remove_bg, strokes), s)
             lines.append(f"OK    {label}  {time.time() - t:.1f} s")
         except Exception as e:
             ok = False
