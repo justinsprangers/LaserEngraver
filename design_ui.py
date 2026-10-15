@@ -42,6 +42,7 @@ class DesignController:
         self.draft = D.Renderer(draft=True)          # fast Layout view
         self.executor = ThreadPoolExecutor(max_workers=1)     # composites run off the UI thread
         self.gens = {"Layout": 0, "Design": 0}       # per-view render generation (drop stale results)
+        self.cut_preview = {"Layout": [], "Design": []}   # cut lines (canvas inches) per view
         self.stale = {"Layout": True, "Design": True}
         self.active = False
         self.selected = None          # layer id
@@ -56,6 +57,7 @@ class DesignController:
         self._guard = False           # stops field <-> layer feedback loops
         self.fields = {}
         self.photo_snapshot = None    # photo-mode settings, restored when leaving Design mode
+        self._saved_scale_from = "corner"
 
     # ================================================================ building
 
@@ -114,6 +116,7 @@ class DesignController:
         self.nb = nb
         self.design_tab = ttk.Frame(nb, padding=8)
         self.layer_tab = ttk.Frame(nb, padding=8)
+        self.scale_from = tk.StringVar(value=self._saved_scale_from)
         self._build_design_tab(self.design_tab)
 
         # --- keys (only act in Design mode and when not typing in a field)
@@ -142,8 +145,16 @@ class DesignController:
         pc = ttk.Combobox(f, values=list(CANVAS_PRESETS), state="readonly", width=18)
         pc.grid(row=3, column=1, sticky="w")
         pc.bind("<<ComboboxSelected>>", lambda e: self._apply_canvas_preset(pc.get()))
-        ttk.Separator(f).grid(row=4, column=0, columnspan=3, sticky="ew", pady=8)
-        r = 5
+        ttk.Label(f, text="Resize from").grid(row=4, column=0, sticky="w", pady=3)
+        rf = ttk.Frame(f)
+        rf.grid(row=4, column=1, columnspan=2, sticky="w")
+        for text, val in (("Opposite corner", "corner"), ("Center", "center")):
+            rb = ttk.Radiobutton(rf, text=text, value=val, variable=self.scale_from)
+            rb.pack(side="left", padx=(0, 8))
+            self.Tooltip(rb, "What stays put when you drag a corner handle.\n"
+                             "Hold Ctrl while dragging to use the other one.")
+        ttk.Separator(f).grid(row=5, column=0, columnspan=3, sticky="ew", pady=8)
+        r = 6
         ttk.Label(f, text="Material").grid(row=r, column=0, sticky="w", pady=3)
         self.design_mat = ttk.Combobox(f, textvariable=app.vars["material"], state="readonly",
                                        values=sorted(app.materials), width=18)
@@ -159,8 +170,42 @@ class DesignController:
         ttk.Checkbutton(f, text="Mirror (engrave from the back)", variable=app.vars["mirror"]).grid(
             row=r, column=0, columnspan=3, sticky="w")
         r += 1
-        ttk.Checkbutton(f, text="Also save cut outline (SVG)", variable=app.vars["outline"]).grid(
-            row=r, column=0, columnspan=3, sticky="w")
+        ttk.Separator(f).grid(row=r, column=0, columnspan=3, sticky="ew", pady=8)
+        r += 1
+        ttk.Label(f, text="Export", font=("", 9, "bold")).grid(row=r, column=0, columnspan=3, sticky="w")
+        r += 1
+        ttk.Label(f, text="Cut lines file").grid(row=r, column=0, sticky="w", pady=3)
+        self.cut_fmt = tk.StringVar(value=self._fmt_label(self.design.get("cut_format", "svg")))
+        cf = ttk.Combobox(f, textvariable=self.cut_fmt, state="readonly", width=12,
+                          values=list(self.FMT_LABELS.values()))
+        cf.grid(row=r, column=1, sticky="w")
+        cf.bind("<<ComboboxSelected>>", lambda e: self._set_design_opt(
+            "cut_format", next(k for k, v in self.FMT_LABELS.items() if v == self.cut_fmt.get())))
+        self.Tooltip(cf, "Vector file for items set to Cut (red lines, in mm).\n"
+                         "SVG: xTool, LaserGRBL, LightBurn, Trotec Ruby. DXF: Trotec Ruby, LightBurn, xTool.")
+        r += 1
+        self.frame_var = tk.BooleanVar(value=self.design.get("frame", True))
+        cb = ttk.Checkbutton(f, text="Add alignment frame ⓘ", variable=self.frame_var,
+                             command=lambda: self._set_design_opt("frame", self.frame_var.get()))
+        cb.grid(row=r, column=0, columnspan=3, sticky="w")
+        self.Tooltip(cb, "Adds a blue rectangle the size of the canvas to the cut file.\n"
+                         "The engraving PNG is the same size: line their corners up in your\n"
+                         "laser software, then delete or disable the blue frame.")
+        r += 1
+        self.combined_var = tk.BooleanVar(value=self.design.get("combined", False))
+        cb = ttk.Checkbutton(f, text="Also save combined SVG (engraving + cuts) ⓘ", variable=self.combined_var,
+                             command=lambda: self._set_design_opt("combined", self.combined_var.get()))
+        cb.grid(row=r, column=0, columnspan=3, sticky="w")
+        self.Tooltip(cb, "One SVG with the engraving image embedded under the cut lines, already\n"
+                         "lined up. Works in LightBurn; not tested in Trotec Ruby or xTool, so\n"
+                         "keep the separate PNG + cut file as the reliable option.")
+        r += 1
+        cb = ttk.Checkbutton(f, text="Cut outline around everything engraved", variable=app.vars["outline"])
+        cb.grid(row=r, column=0, columnspan=3, sticky="w")
+        r += 1
+        ttk.Label(f, text="  Outline offset (in)").grid(row=r, column=0, sticky="w")
+        ttk.Spinbox(f, textvariable=app.vars["outline_offset_in"], from_=0, to=1, increment=0.02,
+                    width=8).grid(row=r, column=1, sticky="w")
         r += 1
         ttk.Label(f, text="Material, DPI, invert and mirror apply to the whole design. Each photo "
                           "layer has its own style and settings: select it and use the Basic / "
@@ -175,6 +220,16 @@ class DesignController:
                           "redo, Ctrl+D duplicates, Delete removes, Ctrl+S saves the project.",
                   style="Hint.TLabel", justify="left", wraplength=300).grid(
             row=r, column=0, columnspan=3, sticky="w", pady=(10, 0))
+
+    FMT_LABELS = {"none": "None", "svg": "SVG", "dxf": "DXF", "svg+dxf": "SVG + DXF"}
+
+    def _fmt_label(self, key):
+        return self.FMT_LABELS.get(key, "SVG")
+
+    def _set_design_opt(self, key, value):
+        if self.design.get(key) != value:
+            self.design[key] = value
+            self.changed(recomposite=False)
 
     # ================================================================ mode switch
 
@@ -260,7 +315,8 @@ class DesignController:
             detail = {"rect": "rectangle", "ellipse": "ellipse", "line": "line"}[layer.get("shape", "rect")]
         else:
             detail = os.path.basename(layer.get("src", "")) or "(no file)"
-        return f"{kind}: {detail}" + ("" if layer.get("visible", True) else "  (hidden)")
+        return (("✂ " if layer.get("cut") else "") + f"{kind}: {detail}"
+                + ("" if layer.get("visible", True) else "  (hidden)"))
 
     def refresh_list(self):
         lb = self.layer_list
@@ -306,6 +362,9 @@ class DesignController:
             self._guard = True
             self.cw_var.set(d["canvas"]["width_in"])
             self.ch_var.set(d["canvas"]["height_in"])
+            self.cut_fmt.set(self._fmt_label(d.get("cut_format", "svg")))
+            self.frame_var.set(d.get("frame", True))
+            self.combined_var.set(d.get("combined", False))
         finally:
             self._guard = False
             app.suspend_traces = False
@@ -355,7 +414,18 @@ class DesignController:
                       style="Hint.TLabel", justify="left").grid(row=0, column=0, sticky="w")
             return
         ttk.Label(f, text=self._label(layer), font=("", 9, "bold")).grid(row=0, column=0, columnspan=3, sticky="w")
-        r = 1
+        out = ttk.Frame(f)
+        out.grid(row=1, column=0, columnspan=3, sticky="w", pady=(4, 2))
+        ttk.Label(out, text="Output:").pack(side="left")
+        cut_var = tk.StringVar(value="cut" if layer.get("cut") else "engrave")
+        for text, val in (("Engrave", "engrave"), ("Cut (vector) ⓘ", "cut")):
+            rb = ttk.Radiobutton(out, text=text, value=val, variable=cut_var)
+            rb.pack(side="left", padx=(6, 0))
+        self.Tooltip(rb, "Cut: exported as red vector lines in the cut file (SVG/DXF) instead of\n"
+                         "being engraved. Shapes cut along their outline, text along its letter\n"
+                         "outlines, SVGs along their paths, logos and photos along their outline.")
+        cut_var.trace_add("write", lambda *_: self._guard or self._set("cut", cut_var.get() == "cut"))
+        r = 2
         r = self._num(f, r, "X center (in)", "x_in", 0.05)
         r = self._num(f, r, "Y center (in)", "y_in", 0.05)
         if layer["type"] not in ("text", "arctext"):
@@ -528,7 +598,7 @@ class DesignController:
             self.app.suspend_traces = True
             self.app.vars["width_in"].set(round(layer["w_in"], 3))
             self.app.suspend_traces = False
-        if key in ("shape",):
+        if key in ("shape", "cut"):
             self.refresh_list()
         self.changed()
 
@@ -748,16 +818,18 @@ class DesignController:
             return                                   # a newer request is queued
         try:
             t = time.time()
+            r = self.draft if which == "Layout" else self.renderer
             if which == "Layout":
-                gray, _ = self.draft.compose(snap)
+                gray, cover = r.compose(snap)
                 view, fill = Image.fromarray(gray), None
             else:
-                burn, _ = self.renderer.compose(snap)
+                burn, cover = r.compose(snap)
                 look = self.app.materials.get(snap["material"], {}).get("look", ["#ffffff", "#000000"])
                 img = Image.fromarray(np.where(burn, 0, 255).astype(np.uint8))
                 view, fill = ImageOps.colorize(img, black=look[1], white=look[0]), float(burn.mean())
+            cuts = D.all_cut_paths(snap, r, cover)            # red lines on the preview
             sizes = {l["id"]: (l["w_in"], l["h_in"]) for l in snap["layers"] if l["type"] in ("text", "arctext")}
-            self.app.results.put(("design", which, gen, view, sizes, fill, time.time() - t))
+            self.app.results.put(("design", which, gen, view, sizes, fill, time.time() - t, cuts))
         except Exception as e:
             self.app.results.put(("design_error", which, gen, f"Couldn't render the design: {e}"))
 
@@ -768,10 +840,11 @@ class DesignController:
             if msg[2] == self.gens[msg[1]]:
                 app.info.configure(text=msg[3], style="Warn.TLabel")
             return
-        _, which, gen, view, sizes, fill, secs = msg
+        _, which, gen, view, sizes, fill, secs, cuts = msg
         if gen != self.gens[which] or not self.active:
             return
         self.stale[which] = False
+        self.cut_preview[which] = cuts
         for lid, (w, h) in sizes.items():
             layer = self.layer_by_id(lid)
             if layer and not (self.drag and self.drag["id"] == lid and self.drag["mode"] == "scale"):
@@ -810,6 +883,13 @@ class DesignController:
         s, ox, oy, dpi = self._screen()
         W, H = self.design["canvas"]["width_in"] * dpi, self.design["canvas"]["height_in"] * dpi
         c.create_rectangle(ox, oy, ox + W * s, oy + H * s, outline="#94a3b8", dash=(4, 3))
+        k = dpi * s                                   # inches -> screen
+        for pts, closed in self.cut_preview.get(self._shown(), []):
+            flat = [v for x, y in pts for v in (ox + x * k, oy + y * k)]
+            if closed and len(pts) > 2:
+                flat += flat[:2]
+            if len(flat) >= 4:
+                c.create_line(*flat, fill="#ef4444", width=1.5)
         if self.drag and self.drag.get("snap"):
             for kind, v in self.drag["snap"]:
                 if kind == "x":
@@ -839,10 +919,9 @@ class DesignController:
         xs, ys = [p[0] for p in pts], [p[1] for p in pts]
         return min(xs), min(ys), max(xs), max(ys)
 
-    def _snap(self, layer, tol):
-        """Snap the moving layer's edges/center to the canvas and other items' edges/centers.
-        Returns (dx, dy, guides) where guides are ("x" | "y", position in design px)."""
-        dpi = self.design["dpi"]
+    def _snap_targets(self, layer):
+        """x and y positions (inches) things can snap to: canvas edges/center and the edges and
+        centers of every other visible item."""
         cw, ch = self.design["canvas"]["width_in"], self.design["canvas"]["height_in"]
         xs, ys = [0.0, cw / 2, cw], [0.0, ch / 2, ch]
         for other in self.design["layers"]:
@@ -851,6 +930,13 @@ class DesignController:
             l, t, r, b = self._box(other)
             xs += [l, (l + r) / 2, r]
             ys += [t, (t + b) / 2, b]
+        return xs, ys
+
+    def _snap(self, layer, tol):
+        """Snap the moving layer's edges/center to the canvas and other items' edges/centers.
+        Returns (dx, dy, guides) where guides are ("x" | "y", position in design px)."""
+        dpi = self.design["dpi"]
+        xs, ys = self._snap_targets(layer)
         l, t, r, b = self._box(layer)
         guides, shift = [], [0.0, 0.0]
         for axis, mine, targets in ((0, (l, (l + r) / 2, r), xs), (1, (t, (t + b) / 2, b), ys)):
@@ -889,10 +975,9 @@ class DesignController:
                 self.drag = dict(base, mode="rotate", a0=math.atan2(e.y - cy, e.x - cx))
                 return
             if h:
-                for x, y in h["corners"]:
+                for i, (x, y) in enumerate(h["corners"]):
                     if abs(e.x - x) <= HANDLE + 3 and abs(e.y - y) <= HANDLE + 3:
-                        cx, cy = h["center"]
-                        self.drag = dict(base, mode="scale", d0=math.hypot(e.x - cx, e.y - cy) or 1)
+                        self.drag = dict(base, mode="scale", corner=i)
                         return
         s, ox, oy, dpi = self._screen()
         # The topmost item under the cursor wins; empty parts of the selected item's box
@@ -945,22 +1030,7 @@ class DesignController:
                 rot = round(rot / 15) * 15
             layer["rotation"] = round(rot % 360, 2)
         elif mode == "scale":
-            cx, cy = ox + start["x_in"] * dpi * s, oy + start["y_in"] * dpi * s
-            if layer["type"] == "shape" and not shift:
-                # Free resize: distance from the center along the shape's own axes.
-                a = math.radians(start["rotation"])
-                vx, vy = e.x - cx, e.y - cy
-                lx, ly = vx * math.cos(a) + vy * math.sin(a), -vx * math.sin(a) + vy * math.cos(a)
-                layer["w_in"] = max(0.05, 2 * abs(lx) / s / dpi)
-                if layer.get("shape") != "line":
-                    layer["h_in"] = max(0.05, 2 * abs(ly) / s / dpi)
-            else:
-                f = max(0.02, math.hypot(e.x - cx, e.y - cy) / self.drag["d0"])
-                layer["w_in"], layer["h_in"] = start["w_in"] * f, start["h_in"] * f
-                if layer["type"] in ("text", "arctext"):
-                    layer["size_pt"] = max(4.0, start["size_pt"] * f)
-                    if layer["type"] == "arctext":
-                        layer["radius_in"] = max(0.1, start["radius_in"] * f)
+            self._scale(layer, start, e, s, ox, oy, dpi)
         self._refresh_fields()
         # Live preview while dragging; resizing/rotating a photo re-renders on release (slow).
         cheap = mode == "move" or layer["type"] != "image"
@@ -968,6 +1038,98 @@ class DesignController:
             self._last_live = time.time()
             self.request_composite()
         app.request_redraw()
+
+    def _scale(self, layer, start, e, s, ox, oy, dpi):
+        """Corner-handle resize. From the opposite corner (default) or from the center (setting,
+        or hold Ctrl to switch). Photos/logos/SVG/text keep their proportions; shapes resize
+        freely (Shift keeps proportions). Edges snap to other items and the canvas (Alt = off)."""
+        from_center = (self.scale_from.get() == "center") != bool(e.state & 0x4)
+        sx, sy = ((-1, -1), (1, -1), (1, 1), (-1, 1))[self.drag["corner"]]
+        w0, h0 = start["w_in"], start["h_in"]
+        a = math.radians(start["rotation"])
+        ux, uy = (math.cos(a), math.sin(a)), (-math.sin(a), math.cos(a))
+        if from_center:
+            px, py = start["x_in"], start["y_in"]
+            c0 = (sx * w0 / 2, sy * h0 / 2)            # dragged corner, relative to the fixed point
+        else:
+            ax, ay = -sx * w0 / 2, -sy * h0 / 2         # opposite corner stays put
+            px = start["x_in"] + ax * ux[0] + ay * uy[0]
+            py = start["y_in"] + ax * ux[1] + ay * uy[1]
+            c0 = (sx * w0, sy * h0)
+        mx, my = (e.x - ox) / s / dpi, (e.y - oy) / s / dpi
+        lx = (mx - px) * ux[0] + (my - py) * ux[1]
+        ly = (mx - px) * uy[0] + (my - py) * uy[1]
+        locked = layer["type"] != "shape" or bool(e.state & 0x1)
+        line = layer["type"] == "shape" and layer.get("shape") == "line"
+        if locked:
+            f = (lx * c0[0] + ly * c0[1]) / max(c0[0] ** 2 + c0[1] ** 2, 1e-9)
+            fx = fy = f
+        else:
+            fx = lx / c0[0] if c0[0] else 1.0
+            fy = ly / c0[1] if c0[1] and not line else 1.0
+        guides = []
+        if abs(start["rotation"] % 360) < 0.01 and not e.state & 0x20000:
+            # Snap the moving edges (only for unrotated items, where edges are well defined).
+            xs, ys = self._snap_targets(layer)
+            tol = SNAP_PX / s / dpi
+            best = {}
+            for axis, p, c, fcur, targets in ((0, px, c0[0], fx, xs), (1, py, c0[1], fy, ys)):
+                if not c or (axis == 1 and line):
+                    continue
+                edge = p + c * fcur
+                for t in targets:
+                    if abs(t - edge) < tol and (axis not in best or abs(t - edge) < best[axis][0]):
+                        best[axis] = (abs(t - edge), (t - p) / c, t)
+            if locked and best:
+                axis = min(best, key=lambda k: best[k][0])
+                fx = fy = best[axis][1]
+                guides.append(("x" if axis == 0 else "y", best[axis][2] * dpi))
+            else:
+                for axis, (_, fnew, t) in best.items():
+                    if axis == 0:
+                        fx = fnew
+                    else:
+                        fy = fnew
+                    guides.append(("x" if axis == 0 else "y", t * dpi))
+        minf = 0.05 / max(w0, h0, 1e-6)
+        fx, fy = max(fx, minf), max(fy, minf)
+        layer["w_in"], layer["h_in"] = w0 * fx, (h0 if line else h0 * fy)
+        cx, cy = c0[0] * fx / 2, c0[1] * (1 if line else fy) / 2
+        if from_center:
+            layer["x_in"], layer["y_in"] = start["x_in"], start["y_in"]
+        else:
+            layer["x_in"] = px + cx * ux[0] + cy * uy[0]
+            layer["y_in"] = py + cx * ux[1] + cy * uy[1]
+        if layer["type"] in ("text", "arctext"):
+            layer["size_pt"] = max(4.0, start["size_pt"] * fx)
+            if layer["type"] == "arctext":
+                layer["radius_in"] = max(0.1, start["radius_in"] * fx)
+        self.drag["snap"] = guides
+
+    def on_motion(self, e):
+        """Cursor feedback: resize arrows on corners, rotate on the top circle, move on items."""
+        app = self.app
+        if self.drag or not app.disp:
+            return
+        cur, h = "arrow", self.handles
+        if h:
+            if math.hypot(e.x - h["rot"][0], e.y - h["rot"][1]) <= HANDLE + 3:
+                cur = "exchange"
+            else:
+                cx, cy = h["center"]
+                for x, y in h["corners"]:
+                    if abs(e.x - x) <= HANDLE + 3 and abs(e.y - y) <= HANDLE + 3:
+                        cur = "size_nw_se" if (x - cx) * (y - cy) > 0 else "size_ne_sw"
+                        break
+        if cur == "arrow":
+            layer = self.sel_layer()
+            s, ox, oy, dpi = self._screen()
+            s_view = app.disp[0]
+            if (layer and self._inside(layer, e.x, e.y)) or \
+                    self._view_renderer().hit_test(self.design, (e.x - ox) / s_view, (e.y - oy) / s_view):
+                cur = "fleur"
+        if str(app.canvas.cget("cursor")) != cur:
+            app.canvas.configure(cursor=cur)
 
     def on_release(self, e):
         if not self.drag:
@@ -1068,8 +1230,9 @@ class DesignController:
 
         def job():
             try:
-                D.save_engraving(snap, self.renderer, out)
-                app.results.put(("status", f"Saved {os.path.basename(out)}"))
+                files = D.save_engraving(snap, self.renderer, out)
+                names = ", ".join(os.path.basename(f) for f in files) or "nothing (design is empty)"
+                app.results.put(("status", f"Saved {names}"))
             except Exception as e:
                 app.results.put(("status", f"Save failed: {e}"))
         self.executor.submit(job)
@@ -1077,7 +1240,8 @@ class DesignController:
     # ================================================================ app state
 
     def state(self):
-        return {"design": self.design, "project": self.project_path, "dirty": self.dirty}
+        return {"design": self.design, "project": self.project_path, "dirty": self.dirty,
+                "scale_from": self.scale_from.get()}
 
     def restore_state(self, st):
         if st.get("design"):
@@ -1090,3 +1254,4 @@ class DesignController:
                 pass
         self.project_path = st.get("project")
         self.dirty = bool(st.get("dirty"))
+        self._saved_scale_from = st.get("scale_from", "corner")

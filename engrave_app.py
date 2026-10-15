@@ -339,6 +339,7 @@ class App:
         self.canvas.bind("<ButtonPress-1>", self.on_press)
         self.canvas.bind("<B1-Motion>", self.on_drag)
         self.canvas.bind("<ButtonRelease-1>", self.on_release)
+        self.canvas.bind("<Motion>", lambda e: self._design_view() and self.dc.on_motion(e))
         self.canvas.bind("<ButtonPress-3>", self.pan_start)
         self.canvas.bind("<B3-Motion>", self.pan_move)
         self.canvas.bind("<Configure>", lambda e: self.request_redraw())
@@ -1407,6 +1408,12 @@ def selftest(report_path):
                         D.new_layer("arctext", d), D.new_layer("svg", d, src=svg, w_in=0.5),
                         D.new_layer("image", d, src=path, w_in=1.0)]
         img, _ = D.Renderer().engraving(d)
+        # Cut lines: shape + text outlines (fontTools) + SVG paths, written as SVG and DXF.
+        d["layers"][1]["cut"] = d["layers"][3]["cut"] = True
+        d["cut_format"] = "svg+dxf"
+        files = D.save_engraving(d, D.Renderer(), os.path.join(os.path.dirname(report_path), "selftest_design.png"))
+        if not any(f.endswith("_cut.dxf") for f in files):
+            raise RuntimeError(f"cut files missing: {files}")
         proj = os.path.join(os.path.dirname(report_path), "selftest.lep")
         D.save_project(d, proj)
         D.load_project(proj)

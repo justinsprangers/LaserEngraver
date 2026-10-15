@@ -94,7 +94,11 @@ exports a single engraving, so you don't need Inkscape for the layout step.
    to the **Design** view to see the real engraving; it only renders when you look at it.
    - Drag to move. Edges and centers snap to other items and to the canvas edges and center
      (pink guide lines); hold **Alt** to move freely.
-   - Drag a corner square to resize, or the circle on top to rotate (Shift snaps to 15°).
+   - Drag a corner square to resize. By default the opposite corner stays put; switch to
+     **Resize from: Center** on the Design tab, or hold **Ctrl** while dragging. Edges snap
+     while resizing too. Photos, logos, SVGs and text keep their proportions; shapes resize
+     freely (Shift keeps proportions).
+   - Drag the circle on top to rotate (Shift snaps to 15°). The cursor shows what a drag will do.
    - **Ctrl+click** picks the item underneath, for items stacked on top of each other.
    - Arrow keys nudge (Shift = bigger steps). The mouse wheel zooms, including out past the
      canvas edges.
@@ -110,9 +114,30 @@ exports a single engraving, so you don't need Inkscape for the layout step.
      (upright). Put a top and a bottom arc at the same position with the same radius for a
      round badge.
    - Shapes: filled or outlined, line width, rounded corners.
-5. **Save engraving** writes one 1-bit PNG of the whole design (plus the outline SVG if enabled).
-   Mirror is applied to the whole design at export, so text reads correctly from the front
-   of back-engraved acrylic.
+5. **Engrave or cut:** every item has **Output: Engrave / Cut** at the top of the Layer tab.
+   Shapes start as Cut; everything else starts as Engrave. Cut items are drawn as red lines on
+   the canvas and left out of the engraving:
+   - shapes cut along their outline (fill is ignored);
+   - text and arc text cut along the letter outlines;
+   - SVGs cut along their own paths (SVG `<text>` isn't included; convert text to paths in
+     Inkscape first);
+   - logos and photos cut along their traced outline (for photos, the background-removed shape).
+6. **Save engraving** writes:
+   - `<name>.png`: the 1-bit engraving (if anything is engraved);
+   - `<name>_cut.svg` and/or `<name>_cut.dxf`: the cut lines, as chosen under **Cut lines
+     file** on the Design tab. They're in millimetres with cut lines in pure red (#FF0000),
+     which Trotec Ruby, xTool, LaserGRBL and LightBurn can map to a cut layer. DXF is the
+     old R12 format for the widest compatibility;
+   - optional `<name>_combined.svg`: the engraving embedded under the cuts, already aligned
+     (works in LightBurn; not tested in Ruby or xTool).
+
+   **Lining them up:** the PNG is exactly the canvas size, and with **Add alignment frame** on,
+   the cut file has a blue rectangle the size of the canvas. Import both, align the PNG's
+   corner with the blue frame's corner, then delete or disable the frame.
+
+   **Cut outline around everything engraved** adds a cut line around the engraved artwork,
+   pushed out by the offset. Mirror is applied to the engraving and the cut lines together, so
+   text reads correctly from the front of back-engraved acrylic.
 
 **Projects:** **Save** / **Save as…** write a `.lep` project file. It's self-contained (it includes
 copies of every image and all photo fixes), so it still opens if the originals move, or on
@@ -258,6 +283,7 @@ Run `python engrave_core.py -h` for all options.
 | `engrave_core.py` | All image processing. Change the pipeline here. |
 | `design.py` | Design mode engine: layers, text/arc text/shapes/logos/SVG rendering, compositing, project files. |
 | `design_ui.py` | Design mode screens: layers panel, Design/Layer tabs, drag handles, undo. |
+| `vectors.py` | Cut lines (shapes, letter outlines, SVG paths, traced outlines) and the SVG/DXF writers. |
 | `materials.json` | Material profiles. |
 | `settings.json` | Remembers your last settings and file list (created automatically, not in git). |
 | `output/` | Default save folder (not in git). |

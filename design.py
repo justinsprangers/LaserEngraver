@@ -24,6 +24,7 @@ import os
 import uuid
 import zipfile
 
+import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
@@ -54,6 +55,8 @@ def new_design(material="wood", width_in=6.0, height_in=4.0, dpi=254):
     return {"version": DESIGN_VERSION, "canvas": {"width_in": width_in, "height_in": height_in},
             "dpi": dpi, "material": material, "invert": bool(m.get("invert", False)),
             "mirror": bool(m.get("mirror", False)), "outline": False, "outline_offset_in": 0.1,
+            # Export: vector file(s) for cut lines, alignment frame, combined SVG (image + cuts)
+            "cut_format": "svg", "frame": True, "combined": False,
             "layers": []}
 
 
@@ -62,7 +65,8 @@ def new_layer(kind, design, **kw):
     cw, ch = design["canvas"]["width_in"], design["canvas"]["height_in"]
     base = {"id": uuid.uuid4().hex[:10], "type": kind, "name": TYPE_LABELS[kind], "visible": True,
             "x_in": cw / 2, "y_in": ch / 2, "w_in": min(cw, ch) * 0.6, "h_in": min(cw, ch) * 0.6,
-            "rotation": 0.0}
+            "rotation": 0.0,
+            "cut": kind == "shape"}       # Cut = exported as vector cut lines, not engraved
     if kind == "image":
         s = core.Settings(material=design["material"])
         materials = core.load_materials()
@@ -365,7 +369,41 @@ class Renderer:
 
     def __init__(self, limit=40, draft=False):
         self.cache, self.limit, self.draft = {}, limit, draft
+        self.path_cache = {}
         self.placed = {}           # layer id -> (x0, y0, cover bool array) from the last render
+        self.cuts = {}             # layer id -> cut polylines (canvas inches) from the last render
+
+    def cut_paths(self, layer, design):
+        """A Cut layer's vector lines in canvas inches (cached relative to the layer's position,
+        so moving it is instant)."""
+        import vectors
+        key = _layer_key(layer, design)
+        hit = self.path_cache.get(key)
+        if hit is None:
+            paths = vectors.layer_paths(layer, self, design)
+            size = (layer["w_in"], layer["h_in"]) if layer["type"] in ("text", "arctext") else None
+            rel = [([(x - layer["x_in"], y - layer["y_in"]) for x, y in pts], c) for pts, c in paths]
+            hit = (rel, size)
+            if len(self.path_cache) >= self.limit:
+                self.path_cache.pop(next(iter(self.path_cache)))
+            self.path_cache[key] = hit
+        rel, size = hit
+        if size:
+            layer["w_in"], layer["h_in"] = size
+        return [([(x + layer["x_in"], y + layer["y_in"]) for x, y in pts], c) for pts, c in rel]
+
+    def _line_mask(self, paths, dpi, width=4):
+        """Thick rasterized cut lines, so Cut items can be clicked on the canvas."""
+        pts = [p for poly, _ in paths for p in poly]
+        if not pts:
+            return 0, 0, np.zeros((1, 1), bool)
+        xs, ys = [p[0] * dpi for p in pts], [p[1] * dpi for p in pts]
+        x0, y0 = int(min(xs)) - width, int(min(ys)) - width
+        m = np.zeros((int(max(ys)) - y0 + width + 1, int(max(xs)) - x0 + width + 1), np.uint8)
+        for poly, closed in paths:
+            arr = np.array([[(x * dpi - x0), (y * dpi - y0)] for x, y in poly], np.int32).reshape(-1, 1, 2)
+            cv2.polylines(m, [arr], closed, 1, thickness=width)
+        return x0, y0, m.astype(bool)
 
     def dpi(self, design):
         return min(design["dpi"], DRAFT_DPI) if self.draft else design["dpi"]
@@ -413,11 +451,17 @@ class Renderer:
         H = _px(design["canvas"]["height_in"], dpi)
         burn = np.full((H, W), 255, np.uint8) if self.draft else np.zeros((H, W), bool)
         cover_all = np.zeros((H, W), bool)
-        self.placed = {}
+        self.placed, self.cuts = {}, {}
         for layer in design["layers"]:
             if not layer.get("visible", True):
                 continue
             if layer["type"] in ("image", "logo", "svg") and not (layer.get("src") and os.path.exists(layer["src"])):
+                continue
+            if layer.get("cut"):
+                # Cut items aren't engraved: they become vector lines (shown red in the preview).
+                paths = self.cut_paths(layer, design)
+                self.cuts[layer["id"]] = paths
+                self.placed[layer["id"]] = self._line_mask(paths, dpi)
                 continue
             ink, cover = self.layer_masks(layer, design)
             h, w = ink.shape
@@ -468,16 +512,44 @@ class Renderer:
         return found
 
 
+CUT_FORMATS = {"none": (), "svg": ("svg",), "dxf": ("dxf",), "svg+dxf": ("svg", "dxf")}
+
+
+def all_cut_paths(design, renderer, cover):
+    """Every cut line in the design (Cut items + the optional outline), canvas inches.
+    Call after renderer.compose()/engraving() so renderer.cuts is current."""
+    import vectors
+    paths = [p for lid in [l["id"] for l in design["layers"]] for p in renderer.cuts.get(lid, [])]
+    if design.get("outline") and cover.any():
+        paths += vectors.outline_paths(cover, renderer.dpi(design), design.get("outline_offset_in", 0.1))
+    return paths
+
+
 def save_engraving(design, renderer, out_path):
-    """Writes the design's 1-bit PNG (and outline SVG if enabled). Returns the PNG path."""
-    img, cover = renderer.engraving(design)
+    """Writes the engraving PNG (if anything is engraved) and the cut-line file(s) chosen in the
+    design: <name>_cut.svg / _cut.dxf, plus <name>_combined.svg if enabled. Returns the files."""
+    import vectors
+    burn, cover = renderer.compose(design)
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
-    img.save(out_path, dpi=(design["dpi"], design["dpi"]))
-    if design.get("outline"):
-        s = core.Settings(dpi=design["dpi"], outline_offset_in=design.get("outline_offset_in", 0.1))
-        with open(out_path[:-4] + "_outline.svg", "w", encoding="utf-8") as f:
-            f.write(core.outline_svg(cover, s))
-    return out_path
+    written = []
+    if burn.any():
+        img = Image.fromarray(np.where(burn, 0, 255).astype(np.uint8)).convert("1")
+        if design.get("mirror"):
+            img = ImageOps.mirror(img)
+        img.save(out_path, dpi=(design["dpi"], design["dpi"]))
+        written.append(out_path)
+    paths = all_cut_paths(design, renderer, cover)
+    if paths:
+        base, frame = out_path[:-4], design.get("frame", True)
+        for fmt in CUT_FORMATS.get(design.get("cut_format", "svg"), ("svg",)):
+            f = f"{base}_cut.{fmt}"
+            (vectors.write_svg if fmt == "svg" else vectors.write_dxf)(paths, design, f, frame=frame)
+            written.append(f)
+        if design.get("combined"):
+            f = f"{base}_combined.svg"
+            vectors.write_svg(paths, design, f, frame=False, png_path=out_path if burn.any() else None)
+            written.append(f)
+    return written
 
 
 # ------------------------------------------------------------------------------
@@ -531,6 +603,7 @@ def load_project(path):
 def _with_defaults(layer, design):
     """Fills in fields added in later versions so old projects keep opening."""
     filled = new_layer(layer["type"], design)
+    filled["cut"] = False             # items saved before Cut existed were all engraved
     filled.update(layer)
     if layer["type"] == "image":
         settings = dict(new_layer("image", design)["settings"])
