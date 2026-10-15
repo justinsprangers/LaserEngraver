@@ -81,6 +81,40 @@ the engraving needs, meaning it will be upscaled and lose some sharpness.
   on every side, so center the two on each other in your laser software.
 - `..._preview.jpg` (if *Also save side-by-side preview JPG* is ticked): adjusted vs. final.
 
+## Design mode (layouts with text, logos and shapes)
+
+Switch **Photos | Design** at the top left. Design mode lays out several items on one canvas and
+exports a single engraving, so you don't need Inkscape for the layout step.
+
+1. **Design** tab: set the canvas size (your material), material, DPI, invert, mirror, and
+   whether to save a cut outline.
+2. **Add ▾** (Layers panel): Photo, Logo / clip art (PNG), SVG, Text, Arc text, Rectangle,
+   Circle / ellipse, Line.
+3. Arrange on the **Design** view: drag to move (snaps to the canvas center lines), drag a
+   corner square to resize, drag the circle on top to rotate (Shift snaps to 15°). Arrow keys
+   nudge (Shift = bigger steps). ▲ / ▼ change the stacking order; items higher in the list sit
+   on top.
+4. **Layer** tab: exact position, size and rotation, plus settings for the selected item:
+   - Photo: crop (% from each edge). Its style (photo / comic), tone, background removal and
+     cut-out fixes are on the Basic / Photo tuning / Comic tuning tabs, separately for every photo.
+   - Logo / SVG: dark threshold, or engrave the light parts instead. Transparent areas let
+     lower layers show through.
+   - Text: text, font (type to filter), style, size in points, alignment, line spacing,
+     outline-only.
+   - Arc text: text along a circle, either over the top (reads clockwise) or along the bottom
+     (upright). Put a top and a bottom arc at the same position with the same radius for a
+     round badge.
+   - Shapes: filled or outlined, line width, rounded corners.
+5. **Save engraving** writes one 1-bit PNG of the whole design (plus the outline SVG if enabled).
+   Mirror is applied to the whole design at export, so text reads correctly from the front
+   of back-engraved acrylic.
+
+**Projects:** **Save** / **Save as…** write a `.lep` project file. It's self-contained (it includes
+copies of every image and all photo fixes), so it still opens if the originals move, or on
+another PC. **Open…** loads one. Your current design is also remembered when you close the app,
+even if you haven't saved it. Ctrl+Z / Ctrl+Y undo and redo, Ctrl+D duplicates, Delete removes,
+Ctrl+S saves.
+
 ## Fixing the background removal
 
 When **Remove background** is on, a toolbar appears above the preview, along with the
@@ -217,6 +251,8 @@ Run `python engrave_core.py -h` for all options.
 | `dist/`, `build/`, `installer/` | Build outputs (not in git). |
 | `engrave_app.py` | The window (tkinter). |
 | `engrave_core.py` | All image processing. Change the pipeline here. |
+| `design.py` | Design mode engine: layers, text/arc text/shapes/logos/SVG rendering, compositing, project files. |
+| `design_ui.py` | Design mode screens: layers panel, Design/Layer tabs, drag handles, undo. |
 | `materials.json` | Material profiles. |
 | `settings.json` | Remembers your last settings and file list (created automatically, not in git). |
 | `output/` | Default save folder (not in git). |

@@ -20,6 +20,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from PIL import Image, ImageOps, ImageTk
 
+import design_ui
 import engrave_core as core
 
 STATE_FILE = os.path.join(core.DATA_DIR, "settings.json")
@@ -145,6 +146,9 @@ class App:
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         root.report_callback_exception = self.on_error
 
+        self.mode = tk.StringVar(value="photos")
+        self.dc = design_ui.DesignController(self, Tooltip)   # Design mode (layout editor)
+        self.dc.restore_state(state.get("design_state", {}))
         self._build()
         root.update_idletasks()
         # Size the settings column to its contents (works at any Windows display scaling).
@@ -154,6 +158,9 @@ class App:
                 self._add_file(f)
         if self.files:
             self.listbox.selection_set(0)
+        if state.get("mode") == "design":
+            self.mode.set("design")
+            self.dc.enter()
         self.on_change()
         self.root.after(50, self._poll)
 
@@ -169,13 +176,26 @@ class App:
 
         top = ttk.Frame(self.root, padding=(8, 8, 8, 4))
         top.pack(fill="x")
-        ttk.Button(top, text="Add images…", command=self.add_images).pack(side="left")
-        ttk.Button(top, text="Add folder…", command=self.add_folder).pack(side="left", padx=4)
-        ttk.Button(top, text="Remove", command=self.remove_selected).pack(side="left")
-        ttk.Button(top, text="Help", command=self.open_help).pack(side="right")
-        ttk.Button(top, text="Open", command=self.open_out).pack(side="right", padx=(4, 12))
-        ttk.Button(top, text="Change…", command=self.choose_out).pack(side="right")
-        ttk.Entry(top, textvariable=self.out_dir, width=46).pack(side="right", padx=4)
+        self.mode_frame = ttk.Frame(top)
+        self.mode_frame.pack(side="left", padx=(0, 16))
+        for text, val, tip in (("Photos", "photos", "Process photos one by one or in batches."),
+                               ("Design", "design", "Lay out photos, logos, SVGs, text and shapes\n"
+                                                    "into one engraving, and save it as a project.")):
+            rb = ttk.Radiobutton(self.mode_frame, text=text, value=val, variable=self.mode,
+                                 command=self.set_mode)
+            rb.pack(side="left", padx=(0, 6))
+            Tooltip(rb, tip)
+        self.file_toolbar = ttk.Frame(top)
+        self.file_toolbar.pack(side="left")
+        ttk.Button(self.file_toolbar, text="Add images…", command=self.add_images).pack(side="left")
+        ttk.Button(self.file_toolbar, text="Add folder…", command=self.add_folder).pack(side="left", padx=4)
+        ttk.Button(self.file_toolbar, text="Remove", command=self.remove_selected).pack(side="left")
+        ttk.Button(top, text="Help", width=6, command=self.open_help).pack(side="right")
+        ob = ttk.Button(top, text="Open", width=6, command=self.open_out)
+        ob.pack(side="right", padx=(4, 12))
+        Tooltip(ob, "Open the output folder")
+        ttk.Button(top, text="Change…", width=9, command=self.choose_out).pack(side="right")
+        ttk.Entry(top, textvariable=self.out_dir, width=16).pack(side="right", padx=4, fill="x", expand=True)
         ttk.Label(top, text="Save to:").pack(side="right")
 
         # Bottom bar is packed before the body so it can never be squeezed off-screen.
@@ -187,8 +207,9 @@ class App:
         self.batch_btn = ttk.Button(bottom, text="Process all", style="Big.TButton",
                                     command=self.process_all)
         self.batch_btn.pack(side="left", padx=6)
-        ttk.Checkbutton(bottom, text="Also save side-by-side preview JPG",
-                        variable=self.comparison).pack(side="left", padx=8)
+        self.comparison_cb = ttk.Checkbutton(bottom, text="Also save side-by-side preview JPG",
+                                             variable=self.comparison)
+        self.comparison_cb.pack(side="left", padx=8)
         self.progress = ttk.Progressbar(bottom, length=180, mode="determinate")
         self.progress.pack(side="right")
         self.status = ttk.Label(bottom, text="", style="Hint.TLabel")
@@ -206,6 +227,7 @@ class App:
         # --- file list
         lf = ttk.LabelFrame(left, text="Images", padding=4)
         lf.pack(fill="both", expand=False)
+        self.images_frame = lf
         self.listbox = tk.Listbox(lf, height=5, activestyle="none", exportselection=False)
         sb = ttk.Scrollbar(lf, command=self.listbox.yview)
         self.listbox.configure(yscrollcommand=sb.set)
@@ -238,7 +260,7 @@ class App:
         nb.add(basic, text="Basic")
         nb.add(fine, text="Photo tuning")
         nb.add(comic, text="Comic tuning")
-        self.nb, self.fine_tab, self.comic_tab = nb, fine, comic
+        self.nb, self.basic_tab, self.fine_tab, self.comic_tab = nb, basic, fine, comic
         self._build_basic(basic)
         self._build_fine(fine)
         self._build_comic(comic)
@@ -246,9 +268,13 @@ class App:
         # --- preview
         bar = ttk.Frame(right)
         bar.pack(fill="x", pady=(0, 4))
+        self.design_radio = ttk.Radiobutton(bar, text="Design", value="Design", variable=self.view,
+                                            command=self.redraw)        # shown in Design mode only
+        self.view_radios = []
         for v in VIEWS:
-            ttk.Radiobutton(bar, text=v, value=v, variable=self.view,
-                            command=self.redraw).pack(side="left", padx=(0, 8))
+            rb = ttk.Radiobutton(bar, text=v, value=v, variable=self.view, command=self.redraw)
+            rb.pack(side="left", padx=(0, 8))
+            self.view_radios.append(rb)
 
         # Fix tools: shown only while Remove background is on. Two rows: model + tools, then brush.
         self.fixbar = ttk.Frame(right)
@@ -327,6 +353,8 @@ class App:
         self.info = ttk.Label(under, text="", anchor="w", wraplength=600)
         self.info.pack(side="left", fill="x", expand=True)
         self.info.bind("<Configure>", lambda e: self.info.configure(wraplength=max(200, e.width)))
+
+        self.dc.build(top, holder, nb, bottom_hide=[self.batch_btn, self.comparison_cb])
 
     def _build_basic(self, f):
         f.columnconfigure(1, weight=1)
@@ -667,7 +695,7 @@ class App:
         self.set_status("Making test card…")
         self.root.update_idletasks()
         try:
-            out = core.save_test_card(path, self.out_dir.get(), s, self.fixes.get(path))
+            out = core.save_test_card(path, self.out_dir.get(), s, self.strokes_for(path) or None)
         except Exception as e:
             messagebox.showerror("Test card failed", str(e))
             return
@@ -734,8 +762,38 @@ class App:
         self.on_change()
 
     def current_file(self):
+        if self.dc.active:
+            return self.dc.current_src()           # the selected photo layer, if any
         sel = self.listbox.curselection()
         return self.files[sel[0]] if sel else None
+
+    def set_mode(self):
+        if self.mode.get() == "design" and not self.dc.active:
+            self.dc.enter()
+        elif self.mode.get() == "photos" and self.dc.active:
+            self.dc.leave()
+
+    def load_settings_into_vars(self, s):
+        """Puts a Settings object into the controls without triggering a preview per field."""
+        self.suspend_traces = True
+        try:
+            for name, value in s.to_dict().items():
+                if name in self.vars:
+                    self.vars[name].set(str(value) if name == "dpi" else value)
+        finally:
+            self.suspend_traces = False
+
+    # Fix strokes live in fixes.json per photo in Photos mode, and inside each photo layer in
+    # Design mode (so the same photo can be used twice with different fixes).
+    def strokes_for(self, path):
+        if self.dc.active:
+            return list(self.dc.strokes())
+        return list(self.fixes.get(path, []))
+
+    def _strokes_mut(self, path):
+        if self.dc.active:
+            return self.dc.strokes()
+        return self.fixes.setdefault(path, [])
 
     def choose_out(self):
         d = filedialog.askdirectory(title="Save engravings to", initialdir=self.out_dir.get())
@@ -758,6 +816,8 @@ class App:
     def on_change(self):
         if self.suspend_traces:
             return
+        if self.dc.active:
+            self.dc.sync_from_vars()               # controls -> design / selected photo layer
         self.gen += 1
         if self.pending:
             self.root.after_cancel(self.pending)
@@ -788,6 +848,10 @@ class App:
         self.pending = None
         path, s = self.current_file(), self.settings()
         if path is None:
+            if self.dc.active:                     # no photo layer selected: keep the Design view
+                self.views = {k: v for k, v in self.views.items() if k == "Design"}
+                self.redraw()
+                return
             self.views = {}
             self.redraw()
             self.info.configure(text="Add images to get started (Add images… or Add folder…).",
@@ -796,7 +860,7 @@ class App:
         if s is None:
             return
         gen = self.gen
-        strokes = list(self.fixes.get(path, []))
+        strokes = self.strokes_for(path)
         key = (path, s.bg_model)
         if not s.remove_bg:
             msg = "Updating preview…"
@@ -859,6 +923,10 @@ class App:
                     if gen == self.gen:
                         self.last_mask = mask
                         self.show_preview(path, s, src, gray, result, cutout)
+                elif kind in ("design", "design_error"):
+                    self.dc.on_result(msg)
+                elif kind == "status":
+                    self.set_status(msg[1])
                 elif kind == "error":
                     if msg[1] == self.gen:
                         self.set_status("")
@@ -891,7 +959,7 @@ class App:
 
     def show_preview(self, path, s, src, gray, result, cutout=None):
         self.last = (self.gen, path, s, gray, result)
-        if path != self._shown_path:              # new image: start zoomed to fit
+        if path != self._shown_path and self.view.get() != "Design":   # new image: zoom to fit
             self._shown_path = path
             self.zf, self.cu, self.cv = 1.0, 0.5, 0.5
         look = self.materials.get(s.material, {}).get("look", ["#ffffff", "#000000"])
@@ -899,14 +967,21 @@ class App:
         material_look = ImageOps.colorize(result.convert("L"), black=look[1], white=look[0])
         if s.mirror:
             material_look = ImageOps.mirror(material_look)   # show it as seen from the front
+        design_view = self.views.get("Design")
         self.views = {"Original": src, "Adjusted": gray, "Engraving": result,
                       "Material look": material_look}
+        if design_view is not None:
+            self.views["Design"] = design_view
         self.view_factor = {}
         if cutout:
             self.views["Cut-out"], self.view_factor["Cut-out"] = cutout
         else:
             self.views["Cut-out"] = src      # nothing removed; just show the photo
         self.update_labels()
+        if self.dc.active:                   # the info line describes the whole design
+            self.set_status("")
+            self.redraw()
+            return
         w, h = result.size
         eff = src.width / s.width_in
         text = (f"Output {w} × {h} px  ·  {s.width_in:g} × {h / s.dpi:.2f} in @ {s.dpi} DPI  ·  "
@@ -969,6 +1044,8 @@ class App:
         self.zoom_lbl.configure(text=f"{scale * 100:.0f}%")
         if self.view.get() == "Cut-out" and self.vars["remove_bg"].get():
             self._draw_strokes()
+        if self.dc.active and self.view.get() == "Design":
+            self.dc.draw_overlay()
 
     def zoom_by(self, factor, x=None, y=None):
         """Zoom by factor, keeping the image point under (x, y) (default: center) still."""
@@ -1047,7 +1124,7 @@ class App:
     def prefetch_cutouts(self):
         """With Remove background on, load the AI model and cut out every listed image in the
         background, so each is ready (from the disk cache) by the time you click it."""
-        if not self.vars["remove_bg"].get():
+        if not self.vars["remove_bg"].get() or self.dc.active:   # designs have few photos
             return
         model = self.vars["bg_model"].get()
         if model not in core.BG_MODELS:
@@ -1099,7 +1176,7 @@ class App:
         elif not on and self.fixbar.winfo_ismapped():
             self.fixbar.pack_forget()
             self.tool.set("pan")
-        n = len(self.fixes.get(self.current_file(), []))
+        n = len(self.strokes_for(self.current_file()))
         self.fix_hint.configure(text=f"{n} fix{'es' if n != 1 else ''} ⓘ")
         self.canvas.configure(cursor="fleur" if self.tool.get() == "pan" else "crosshair")
 
@@ -1117,7 +1194,13 @@ class App:
         scale, x0, y0, factor = self.disp
         return ((cx - x0) / scale * factor, (cy - y0) / scale * factor)
 
+    def _design_view(self):
+        return self.dc.active and self.view.get() == "Design"
+
     def on_press(self, e):
+        if self._design_view():
+            self.dc.on_press(e)
+            return
         if not self._drawing():
             self.pan_start(e)
             return
@@ -1129,6 +1212,9 @@ class App:
         self.live = (kind, [cx, cy], [self._to_src(cx, cy)], item)
 
     def on_drag(self, e):
+        if self._design_view():
+            self.dc.on_drag(e)
+            return
         if not self.live:
             if not self._drawing():
                 self.pan_move(e)
@@ -1142,6 +1228,9 @@ class App:
         self.canvas.coords(item, *cpts)
 
     def on_release(self, e):
+        if self._design_view():
+            self.dc.on_release(e)
+            return
         if not self.live:
             return
         kind, _, spts, _ = self.live
@@ -1149,31 +1238,34 @@ class App:
         scale, _, _, factor = self.disp
         radius = round(self.brush.get() / 2 / scale * factor, 1)
         stroke = (kind, radius, [(round(x, 1), round(y, 1)) for x, y in spts])
-        self.fixes.setdefault(self.current_file(), []).append(stroke)
+        self._strokes_mut(self.current_file()).append(stroke)
         self._fixes_changed()
 
     def undo_stroke(self):
-        strokes = self.fixes.get(self.current_file())
+        strokes = self._strokes_mut(self.current_file())
         if strokes:
             strokes.pop()
             self._fixes_changed()
 
     def clear_fixes(self):
         path = self.current_file()
-        if self.fixes.get(path) and messagebox.askyesno(
+        if self.strokes_for(path) and messagebox.askyesno(
                 "Clear fixes", "Remove all background fixes on this image?"):
-            self.fixes.pop(path, None)
+            self._strokes_mut(path).clear()
             self._fixes_changed()
 
     def _fixes_changed(self):
-        self._save_fixes()
+        if self.dc.active:
+            self.dc.strokes_changed()          # strokes are saved inside the design
+        else:
+            self._save_fixes()
         self.update_fixbar()
         self.on_change()
 
     def _draw_strokes(self):
         """Overlays saved strokes on the Cut-out view so you can see what you've marked."""
         scale, x0, y0, factor = self.disp
-        for kind, radius, pts in self.fixes.get(self.current_file(), []):
+        for kind, radius, pts in self.strokes_for(self.current_file()):
             c = [v for x, y in pts for v in (x0 + x / factor * scale, y0 + y / factor * scale)]
             if len(c) == 2:
                 c += [c[0] + 0.1, c[1] + 0.1]
@@ -1183,6 +1275,9 @@ class App:
     # ---------------------------------------------------------------- saving
 
     def save_current(self):
+        if self.dc.active:
+            self.dc.export()                   # the whole design as one engraving
+            return
         path, s = self.current_file(), self.settings()
         if path is None or s is None:
             messagebox.showinfo("Nothing to save", "Add an image and check the settings first.")
@@ -1244,10 +1339,12 @@ class App:
             return {}
 
     def on_close(self):
-        s = self.settings()
+        # In Design mode the controls show the selected layer, so save the Photos-mode settings.
+        s = (self.dc.photo_snapshot if self.dc.active else None) or self.settings()
         state = {"settings": (s or core.Settings()).to_dict(), "out_dir": self.out_dir.get(),
                  "comparison": self.comparison.get(), "files": self.files,
                  "maximized": self.root.state() == "zoomed",
+                 "mode": self.mode.get(), "design_state": self.dc.state(),   # unsaved designs survive
                  **{f"{st}_preset": v.get() for st, v in self.preset_vars.items()}}
         if self.root.state() == "normal":
             state["geometry"] = self.root.geometry()
@@ -1284,6 +1381,27 @@ def selftest(report_path):
         except Exception as e:
             ok = False
             lines.append(f"FAIL  {label}: {e!r}")
+    # Design mode: text (fonts), arc text, shapes, a photo layer and an SVG (PyMuPDF), plus a
+    # project file round trip.
+    t = time.time()
+    try:
+        import design as D
+        svg = os.path.join(os.path.dirname(report_path), "selftest.svg")
+        with open(svg, "w") as f:
+            f.write('<svg xmlns="http://www.w3.org/2000/svg" width="1in" height="1in" viewBox="0 0 10 10">'
+                    '<circle cx="5" cy="5" r="4" fill="black"/></svg>')
+        d = D.new_design("wood", 3, 3)
+        d["layers"] += [D.new_layer("shape", d, shape="ellipse"), D.new_layer("text", d),
+                        D.new_layer("arctext", d), D.new_layer("svg", d, src=svg, w_in=0.5),
+                        D.new_layer("image", d, src=path, w_in=1.0)]
+        img, _ = D.Renderer().engraving(d)
+        proj = os.path.join(os.path.dirname(report_path), "selftest.lep")
+        D.save_project(d, proj)
+        D.load_project(proj)
+        lines.append(f"OK    design ({len(D.fonts())} fonts, project file)  {time.time() - t:.1f} s")
+    except Exception as e:
+        ok = False
+        lines.append(f"FAIL  design: {e!r}")
     lines.append(f"fast stucki (numba): {core.FAST_STUCKI}")
     ok = ok and core.FAST_STUCKI
     with open(report_path, "w", encoding="utf-8") as f:

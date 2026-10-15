@@ -27,7 +27,7 @@ import sys
 import threading
 from dataclasses import dataclass, asdict, fields
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 
 # Where things live. Running from source, everything is in this folder. As an installed app
 # (PyInstaller sets sys.frozen), the program folder is read-only, so user data goes to
