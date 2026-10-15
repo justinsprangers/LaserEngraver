@@ -27,7 +27,7 @@ import sys
 import threading
 from dataclasses import dataclass, asdict, fields
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 # Where things live. Running from source, everything is in this folder. As an installed app
 # (PyInstaller sets sys.frozen), the program folder is read-only, so user data goes to
@@ -148,13 +148,86 @@ def load_materials():
     return {k: v for k, v in _read_materials_file().items() if not k.startswith("_")}
 
 
+def _write_json(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp, path)
+
+
 def save_material(name, profile):
     """Add or overwrite one material in materials.json."""
     data = _read_materials_file()
     data[name] = profile
-    os.makedirs(DATA_DIR, exist_ok=True)
-    with open(MATERIALS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+    _write_json(MATERIALS_FILE, data)
+
+
+def rename_material(old, new):
+    """Renames a material, keeping its position in the file."""
+    data = _read_materials_file()
+    _write_json(MATERIALS_FILE, {(new if k == old else k): v for k, v in data.items()})
+
+
+def delete_material(name):
+    data = _read_materials_file()
+    data.pop(name, None)
+    _write_json(MATERIALS_FILE, data)
+
+
+def material_name(text):
+    """Material names end up in output filenames, so keep them simple: lowercase, underscores."""
+    keep = "".join(c if c.isalnum() or c in "-_" else "_" for c in text.strip().lower().replace(" ", "_"))
+    return keep.strip("_")
+
+
+# ------------------------------------------------------------------------------
+# Style presets (named sets of photo or comic settings), stored in presets.json
+# ------------------------------------------------------------------------------
+
+PRESETS_FILE = os.path.join(DATA_DIR, "presets.json")
+PRESET_FIELDS = {
+    "photo": ("dither", "shadow_amount", "shadow_radius", "use_clahe", "clahe_clip", "clahe_grid",
+              "sharpen_radius", "sharpen_percent", "sharpen_threshold"),
+    "comic": ("comic_levels", "comic_smooth", "comic_dot_mm", "comic_line_block", "comic_line_c",
+              "comic_line_weight", "comic_despeckle"),
+}
+DEFAULT_PRESET = "Default"      # built in (the original settings); can't be renamed or deleted
+
+
+def _read_presets():
+    try:
+        with open(PRESETS_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        data = {}
+    return {style: dict(data.get(style, {})) for style in PRESET_FIELDS}
+
+
+def load_presets(style):
+    """{name: {field: value}} for 'photo' or 'comic', Default first."""
+    d = Settings()
+    presets = {DEFAULT_PRESET: {f: getattr(d, f) for f in PRESET_FIELDS[style]}}
+    presets.update({k: v for k, v in _read_presets()[style].items() if k != DEFAULT_PRESET})
+    return presets
+
+
+def save_preset(style, name, settings):
+    data = _read_presets()
+    data[style][name] = {f: getattr(settings, f) for f in PRESET_FIELDS[style]}
+    _write_json(PRESETS_FILE, data)
+
+
+def rename_preset(style, old, new):
+    data = _read_presets()
+    data[style] = {(new if k == old else k): v for k, v in data[style].items()}
+    _write_json(PRESETS_FILE, data)
+
+
+def delete_preset(style, name):
+    data = _read_presets()
+    data[style].pop(name, None)
+    _write_json(PRESETS_FILE, data)
 
 
 # ------------------------------------------------------------------------------

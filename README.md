@@ -154,11 +154,29 @@ but the ink lines stay engraved, which gives a scratchboard look on slate or bla
 | CLAHE | Local contrast boost that brings out hair, fabric, and skin texture. |
 | Sharpening | Unsharp mask applied before dithering. |
 
-## Materials
+## Materials and presets
 
-Profiles live in `materials.json`. To add one, tune the sliders and click **Save as material…**,
-or edit the file by hand (it explains each field at the top). **Reset to material** reloads the
-saved values.
+Two kinds of saved settings, kept separate so any look works on any material:
+
+| | What it stores | Where you manage it |
+|---|---|---|
+| **Material** | Contrast, brightness, gamma, invert, mirror (how the material takes the laser) | Basic tab |
+| **Photo preset** | Dither, shadow recovery, CLAHE, sharpening | Top of the Photo tuning tab |
+| **Comic preset** | Tone bands, flatten, dot spacing, line settings | Top of the Comic tuning tab |
+
+- **Materials:** pick one from the Material list to load it. Tune the sliders, then use
+  **Save as material…** (new name, or overwrite an existing one), **Rename material…** or
+  **Delete material**. **Reset to material** reloads the saved values. Names are made
+  lowercase with underscores because they go into output filenames.
+- **Presets:** pick one from the dropdown to load it. "Preset • changed" means the sliders no
+  longer match the selected preset; use **Save as…** to keep them. **Rename…** / **Delete** act on
+  the selected preset, and **Revert to preset** reloads it. Each style has a built-in **Default**
+  (the original settings) that can't be renamed or deleted.
+
+Materials live in `materials.json` and presets in `presets.json` (installed app:
+`%APPDATA%\LaserEngraver`). You can also edit them by hand; `materials.json` explains each field
+at the top. Running from source, `materials.json` is the project's own copy, so deleting a
+built-in material there removes it from the shipped defaults too (git can bring it back).
 
 ## Command line (optional)
 

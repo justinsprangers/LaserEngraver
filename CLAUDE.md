@@ -14,7 +14,7 @@ Desktop app (tkinter) for preparing photos for laser engraving. See README.md fo
 - The user approved small fixes inside `--LASER ENGRAVING TOOLS--` once (README/log text). Still ask before any further edits there.
 - Test with the window off-screen (geometry like `1400x900-6000+0`) or headless. Don't pop windows over the user's screen or screen-grab their desktop.
 - `engrave_app.py` only handles UI. Keep processing logic in `engrave_core.py` so the CLI and app stay in sync.
-- Material profiles live in `materials.json`. Keys starting with `_` are comments.
+- Material profiles live in `materials.json`. Keys starting with `_` are comments. Materials = contrast/brightness/gamma/invert/mirror; style presets (`presets.json`, `core.PRESET_FIELDS`) = photo or comic look settings. Keep the two separate. A built-in "Default" preset per style is generated from `Settings()` defaults, never stored. If you add a new photo or comic setting, add it to `PRESET_FIELDS`.
 - `settings.json` and `output/` are git-ignored.
 - Packaged with PyInstaller (one-folder) + Inno Setup via `build.bat` → `packaging/build.py`. Outputs `dist/`, `build/`, `installer/` are git-ignored.
 - When frozen, `core.FROZEN` is true: user data goes to `%APPDATA%\LaserEngraver`, output defaults to `Documents\Laser Engraver`, bundled read-only files are under `core.HERE` (`sys._MEIPASS`). From source, everything stays in this folder. Keep new file paths going through `core.DATA_DIR` / `core.HERE`.

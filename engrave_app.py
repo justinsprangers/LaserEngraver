@@ -113,6 +113,9 @@ class App:
         self.out_dir = tk.StringVar(value=state.get("out_dir", DEFAULT_OUT))
         self.comparison = tk.BooleanVar(value=state.get("comparison", False))
         self.view = tk.StringVar(value="Engraving")
+        self.preset_vars = {st: tk.StringVar(value=state.get(f"{st}_preset", core.DEFAULT_PRESET))
+                            for st in core.PRESET_FIELDS}
+        self.preset_combos = {}
         self.zf, self.cu, self.cv = 1.0, 0.5, 0.5   # zoom (x fit) and view center (fraction)
         self._redraw_pending = False
         self._pan_from = None
@@ -144,7 +147,7 @@ class App:
         self._build()
         root.update_idletasks()
         # Size the settings column to its contents (works at any Windows display scaling).
-        root.after(100, lambda: self.body.sashpos(0, self.left.winfo_reqwidth() + 8))
+        root.after(300, lambda: self.body.sashpos(0, self.left.winfo_reqwidth() + 8))
         for f in state.get("files", []):
             if os.path.isfile(f):
                 self._add_file(f)
@@ -326,11 +329,12 @@ class App:
                                      style="Hint.TLabel", justify="left")
         self.dither_hint.grid(row=r, column=0, columnspan=3, sticky="w", pady=(0, 4))
         r += 1
-        cb = ttk.Checkbutton(f, text="Remove background (AI, ~1-3 s per photo) ⓘ",
-                             variable=self.vars["remove_bg"])
+        cb = ttk.Checkbutton(f, text="Remove background (AI) ⓘ", variable=self.vars["remove_bg"])
         cb.grid(row=r, column=0, columnspan=3, sticky="w")
         Tooltip(cb, "Cuts out the main subject and makes the background blank,\n"
-                    "so the laser skips it. Also gives the cut outline a real silhouette.")
+                    "so the laser skips it. Also gives the cut outline a real silhouette.\n"
+                    "About 1 s per photo once the AI model has loaded (~4 s, in the background).\n"
+                    "Paint fixes with the Fix cut-out toolbar above the preview.")
         r += 1
         ttk.Checkbutton(f, text="Also save cut outline (SVG)", variable=self.vars["outline"]).grid(
             row=r, column=0, columnspan=3, sticky="w")
@@ -352,15 +356,21 @@ class App:
         bf.grid(row=r, column=0, columnspan=3, sticky="w", pady=(10, 0))
         ttk.Button(bf, text="Reset to material", command=self.on_material).pack(side="left")
         ttk.Button(bf, text="Save as material…", command=self.save_as_material).pack(side="left", padx=4)
+        bf2 = ttk.Frame(f)
+        bf2.grid(row=r + 1, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        ttk.Button(bf2, text="Rename material…", command=self.rename_material).pack(side="left")
+        ttk.Button(bf2, text="Delete material", command=self.delete_material).pack(side="left", padx=4)
+        r += 1
         tc = ttk.Button(f, text="Make test card ⓘ", command=self.make_test_card)
-        tc.grid(row=r + 1, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        tc.grid(row=r + 1, column=0, columnspan=3, sticky="w", pady=(10, 0))
         Tooltip(tc, "Saves a 3x3 grid of this image at different contrast (columns)\n"
                     "and gamma (rows). Burn it on scrap, then type the numbers under\n"
                     "the best tile into Contrast and Gamma.")
 
     def _build_comic(self, f):
         f.columnconfigure(1, weight=1)
-        r = 0
+        self._preset_bar(f, "comic")
+        r = 1
         ttk.Label(f, text="Used when Style = Comic.", style="Hint.TLabel").grid(
             row=r, column=0, columnspan=3, sticky="w", pady=(0, 4))
         r += 1
@@ -381,12 +391,35 @@ class App:
                           "(a scratchboard look on slate or black acrylic).",
                   style="Hint.TLabel", justify="left").grid(row=r, column=0, columnspan=3, sticky="w", pady=(8, 0))
         r += 1
-        ttk.Button(f, text="Reset comic to defaults", command=self.reset_comic).grid(
+        ttk.Button(f, text="Revert to preset", command=lambda: self.apply_preset("comic")).grid(
             row=r, column=0, columnspan=3, sticky="w", pady=(10, 0))
+
+    def _preset_bar(self, f, style):
+        """Preset dropdown + Save as / Rename / Delete, at the top of a tuning tab."""
+        box = ttk.LabelFrame(f, text="Preset", padding=6)
+        box.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 8))
+        combo = ttk.Combobox(box, textvariable=self.preset_vars[style], state="readonly", width=20)
+        combo.pack(fill="x")
+        Tooltip(box, "Pick a saved look to load its settings. \"• changed\" means the sliders\n"
+                     "differ from the selected preset: use Save as… to keep them.\n"
+                     "Material settings (contrast, gamma, ...) are saved separately.")
+        combo.bind("<<ComboboxSelected>>", lambda e: self.apply_preset(style))
+        btns = ttk.Frame(box)
+        btns.pack(fill="x", pady=(4, 0))
+        ttk.Button(btns, text="Save as…", command=lambda: self.save_preset(style)).pack(side="left")
+        ttk.Button(btns, text="Rename…", command=lambda: self.rename_preset(style)).pack(side="left", padx=4)
+        ttk.Button(btns, text="Delete", command=lambda: self.delete_preset(style)).pack(side="left")
+        self.preset_combos[style] = combo
+        self.refresh_presets(style)
 
     def _build_fine(self, f):
         f.columnconfigure(1, weight=1)
-        r = 0
+        self._preset_bar(f, "photo")
+        r = 1
+        ttk.Label(f, text="Dither (also on Basic tab)").grid(row=r, column=0, sticky="w", pady=3)
+        ttk.Combobox(f, textvariable=self.vars["dither"], values=core.DITHER_MODES,
+                     state="readonly", width=16).grid(row=r, column=1, columnspan=2, sticky="w")
+        r += 1
         ttk.Label(f, text="Shadow detail recovery", font=("", 9, "bold")).grid(row=r, column=0, columnspan=3, sticky="w")
         r += 1
         r = self._slider(f, r, "shadow_amount", 0, 0.6, 0.01)
@@ -402,7 +435,7 @@ class App:
         r = self._slider(f, r, "sharpen_radius", 0, 8, 0.5)
         r = self._slider(f, r, "sharpen_percent", 0, 400, 5)
         r = self._slider(f, r, "sharpen_threshold", 0, 20, 1)
-        ttk.Button(f, text="Reset fine-tune to defaults", command=self.reset_fine).grid(
+        ttk.Button(f, text="Revert to preset", command=lambda: self.apply_preset("photo")).grid(
             row=r, column=0, columnspan=3, sticky="w", pady=(10, 0))
 
     def _slider(self, f, r, name, lo, hi, step, label=None):
@@ -475,23 +508,117 @@ class App:
         self.suspend_traces = False
         self.on_change()
 
-    def reset_fine(self):
-        d = core.Settings()
+    # ------------------------------------------------------------- presets
+
+    def refresh_presets(self, style, select=None):
+        names = list(core.load_presets(style))
+        self.preset_combos[style].configure(values=names)
+        if select:
+            self.preset_vars[style].set(select)
+        elif self.preset_vars[style].get() not in names:
+            self.preset_vars[style].set(core.DEFAULT_PRESET)
+        self.update_preset_state()
+
+    def apply_preset(self, style):
+        values = core.load_presets(style).get(self.preset_vars[style].get())
+        if not values:
+            return
         self.suspend_traces = True
-        for k in ("shadow_amount", "shadow_radius", "use_clahe", "clahe_clip", "clahe_grid",
-                  "sharpen_radius", "sharpen_percent", "sharpen_threshold"):
-            self.vars[k].set(getattr(d, k))
+        for k, v in values.items():
+            if k in self.vars:
+                self.vars[k].set(v)
         self.suspend_traces = False
         self.on_change()
 
-    def reset_comic(self):
-        d = core.Settings()
-        self.suspend_traces = True
-        for k in self.vars:
-            if k.startswith("comic_"):
-                self.vars[k].set(getattr(d, k))
+    def update_preset_state(self):
+        """Marks a preset as changed when the sliders no longer match it."""
+        s = self.settings()
+        for style, combo in self.preset_combos.items():
+            values = core.load_presets(style).get(self.preset_vars[style].get(), {})
+            changed = s is not None and any(
+                abs(float(getattr(s, k)) - float(v)) > 1e-6 if isinstance(v, (int, float)) else getattr(s, k) != v
+                for k, v in values.items())
+            combo.master.configure(text="Preset • changed" if changed else "Preset")
+
+    def _ask_name(self, title, prompt, initial=""):
+        name = simpledialog.askstring(title, prompt, initialvalue=initial, parent=self.root)
+        return name.strip() if name and name.strip() else None
+
+    def save_preset(self, style):
+        s = self.settings()
+        if s is None:
+            return
+        current = self.preset_vars[style].get()
+        name = self._ask_name(f"Save {style} preset",
+                              f"Name for these {style} settings (e.g. Portrait, Bold lines):",
+                              "" if current == core.DEFAULT_PRESET else current)
+        if not name:
+            return
+        if name == core.DEFAULT_PRESET:
+            messagebox.showinfo("Name taken", f"'{core.DEFAULT_PRESET}' is built in. Pick another name.")
+            return
+        if name in core.load_presets(style) and not messagebox.askyesno(
+                "Overwrite?", f"Preset '{name}' already exists. Replace it with the current settings?"):
+            return
+        core.save_preset(style, name, s)
+        self.refresh_presets(style, select=name)
+        self.set_status(f"Saved {style} preset '{name}'")
+
+    def rename_preset(self, style):
+        old = self.preset_vars[style].get()
+        if old == core.DEFAULT_PRESET:
+            messagebox.showinfo("Built-in preset", "The Default preset can't be renamed.")
+            return
+        new = self._ask_name("Rename preset", f"New name for '{old}':", old)
+        if not new or new == old:
+            return
+        if new == core.DEFAULT_PRESET or new in core.load_presets(style):
+            messagebox.showinfo("Name taken", f"There's already a preset called '{new}'.")
+            return
+        core.rename_preset(style, old, new)
+        self.refresh_presets(style, select=new)
+
+    def delete_preset(self, style):
+        name = self.preset_vars[style].get()
+        if name == core.DEFAULT_PRESET:
+            messagebox.showinfo("Built-in preset", "The Default preset can't be deleted.")
+            return
+        if messagebox.askyesno("Delete preset", f"Delete the {style} preset '{name}'?\n"
+                                                "Your current slider values stay as they are."):
+            core.delete_preset(style, name)
+            self.refresh_presets(style, select=core.DEFAULT_PRESET)
+            self.set_status(f"Deleted {style} preset '{name}'")
+
+    def rename_material(self):
+        old = self.vars["material"].get()
+        text = self._ask_name("Rename material", f"New name for '{old}':", old)
+        new = core.material_name(text or "")
+        if not new or new == old:
+            return
+        if new in self.materials:
+            messagebox.showinfo("Name taken", f"There's already a material called '{new}'.")
+            return
+        core.rename_material(old, new)
+        self.materials = core.load_materials()
+        self.mat_combo.configure(values=sorted(self.materials))
+        self.suspend_traces = True          # same settings, new name: don't reload the profile
+        self.vars["material"].set(new)
         self.suspend_traces = False
         self.on_change()
+        self.set_status(f"Renamed material '{old}' to '{new}'")
+
+    def delete_material(self):
+        name = self.vars["material"].get()
+        if len(self.materials) <= 1:
+            messagebox.showinfo("Last material", "You need at least one material.")
+            return
+        if not messagebox.askyesno("Delete material", f"Delete the material '{name}'?"):
+            return
+        core.delete_material(name)
+        self.materials = core.load_materials()
+        self.mat_combo.configure(values=sorted(self.materials))
+        self.vars["material"].set(sorted(self.materials)[0])     # loads that material's profile
+        self.set_status(f"Deleted material '{name}'")
 
     def make_test_card(self):
         path, s = self.current_file(), self.settings()
@@ -512,12 +639,11 @@ class App:
         s = self.settings()
         if s is None:
             return
-        name = simpledialog.askstring("Save as material",
-                                      "Name for this material profile (e.g. maple, black_acrylic):",
-                                      initialvalue=s.material, parent=self.root)
+        name = core.material_name(self._ask_name(
+            "Save as material", "Name for this material profile (e.g. maple, black acrylic):",
+            s.material) or "")
         if not name:
             return
-        name = name.strip().lower().replace(" ", "_")
         if name in self.materials and not messagebox.askyesno(
                 "Overwrite?", f"'{name}' already exists. Overwrite its settings?"):
             return
@@ -610,6 +736,7 @@ class App:
         self.dither_combo.state(["!disabled"] if photo else ["disabled"])
         self.dither_hint.configure(foreground="#666" if photo else "#bbb")
         self.update_fixbar()
+        self.update_preset_state()
         path = self.current_file()
         src = self.src_cache.get(path) or (self.ai_cache.get(path) or (None,))[0]
         if src is None:
@@ -1050,7 +1177,8 @@ class App:
         s = self.settings()
         state = {"settings": (s or core.Settings()).to_dict(), "out_dir": self.out_dir.get(),
                  "comparison": self.comparison.get(), "files": self.files,
-                 "maximized": self.root.state() == "zoomed"}
+                 "maximized": self.root.state() == "zoomed",
+                 **{f"{st}_preset": v.get() for st, v in self.preset_vars.items()}}
         if self.root.state() == "normal":
             state["geometry"] = self.root.geometry()
         try:
