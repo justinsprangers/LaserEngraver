@@ -54,9 +54,13 @@ First visit downloads about 20 MB (Python + libraries, from the jsDelivr CDN); t
 
 ## Install it (normal use)
 
-Run **`installer\LaserEngraver-Setup-<version>.exe`**. It installs for your user only (no admin
-prompt) and adds *Laser Engraver* to the Start menu. Uninstall it from Windows Settings → Apps.
-Python isn't needed on the PC it's installed on, so you can copy the Setup file to another PC.
+Download **`LaserEngraver-Setup-<version>.exe`** from the
+[Releases page](https://github.com/justinsprangers/LaserEngraver/releases/latest) and run it.
+It installs for your user only (no admin prompt) and adds *Laser Engraver* to the Start menu.
+Uninstall it from Windows Settings → Apps. Python isn't needed on the PC it's installed on.
+
+The installer isn't code-signed, so Windows SmartScreen may say it "protected your PC" the
+first time: click **More info → Run anyway**. Running a newer Setup updates the app in place.
 
 The installed app keeps its data in these places, which updates and reinstalls don't touch:
 
@@ -79,6 +83,9 @@ it's about 2-3 s per photo.
    double-click **`build.bat`**. After ~3 minutes it self-tests the bundled app and writes
    `installer\LaserEngraver-Setup-<version>.exe`.
 4. Run the new Setup to update the installed app in place.
+5. To share it, push the code, then on GitHub: **Releases → Draft a new release**, tag
+   `v<version>`, and attach the Setup file. (Installers aren't committed to the repo; they're
+   too big and are rebuilt from the code.)
 
 Building needs PyInstaller (`python -m pip install pyinstaller`) and Inno Setup 6
 (`winget install JRSoftware.InnoSetup`). Both are installed on this PC.
