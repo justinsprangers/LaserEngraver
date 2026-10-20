@@ -191,6 +191,19 @@ class DesignController:
         ttk.Label(f_, text="Outline offset (in)").grid(row=4, column=0, sticky="w", pady=3)
         ttk.Spinbox(f_, textvariable=app.vars["outline_offset_in"], from_=0, to=1, increment=0.02,
                     width=8).grid(row=4, column=1, sticky="w")
+        ttk.Label(f_, text="Test copy size (%)").grid(row=5, column=0, sticky="w", pady=(8, 3))
+        self.test_pct = tk.StringVar(value=f"{self.design.get('test_pct', 25):g}")
+        sp = ttk.Spinbox(f_, textvariable=self.test_pct, from_=5, to=100, increment=5, width=8)
+        sp.grid(row=5, column=1, sticky="w", pady=(8, 3))
+        self.test_size = ttk.Label(f_, style="Hint.TLabel")
+        self.test_size.grid(row=6, column=0, columnspan=2, sticky="w")
+        b = ttk.Button(f_, text="Save test copy", command=self.export_test)
+        b.grid(row=7, column=0, columnspan=2, sticky="w", pady=(2, 0))
+        self.Tooltip(b, "Saves a shrunken copy of the whole design (same DPI, material and\n"
+                        "settings, so it burns like the real job) to try on scrap first.\n"
+                        "Files end in _test.")
+        self.test_pct.trace_add("write", lambda *a: self._test_pct_changed())
+        self._update_test_size()
         r = 3
         ttk.Label(f, text="Material, DPI, invert and mirror apply to the whole design. Each photo "
                           "layer has its own style and settings: select it and use the Basic / "
@@ -350,6 +363,7 @@ class DesignController:
             self.cut_fmt.set(self._fmt_label(d.get("cut_format", "svg")))
             self.frame_var.set(d.get("frame", True))
             self.combined_var.set(d.get("combined", False))
+            self.test_pct.set(f"{d.get('test_pct', 25):g}")
         finally:
             self._guard = False
             app.suspend_traces = False
@@ -607,6 +621,7 @@ class DesignController:
     def changed(self, recomposite=True):
         self.dirty = True
         self.update_title()
+        self._update_test_size()
         if recomposite:
             self.request_composite()
         if self._commit_job:
@@ -1209,21 +1224,52 @@ class DesignController:
         self.app.set_status(f"Saved project {os.path.basename(path)}")
         return True
 
-    def export(self):
+    def _test_factor(self):
+        try:
+            pct = float(self.test_pct.get())
+        except (tk.TclError, ValueError):
+            return None
+        return pct / 100 if 1 <= pct <= 100 else None
+
+    def _test_pct_changed(self):
+        f = self._test_factor()
+        if f is not None and not self._guard:
+            self._set_design_opt("test_pct", round(f * 100, 2))
+        self._update_test_size()
+
+    def _update_test_size(self):
+        if not hasattr(self, "test_size"):
+            return
+        f = self._test_factor()
+        c = self.design["canvas"]
+        self.test_size.configure(text=f"Test copy: {c['width_in'] * f:.2f} × {c['height_in'] * f:.2f} in"
+                                 if f else "Enter a size from 1 to 100%")
+
+    def export_test(self):
+        f = self._test_factor()
+        if f is None:
+            messagebox.showinfo("Test copy", "Enter a test copy size from 1 to 100%.")
+            return
+        self.export(factor=f)
+
+    def export(self, factor=None):
+        """Saves the engraving and cut files. With `factor`, saves a shrunken test copy instead
+        (its own renderer, so the real design's cached layers are kept)."""
         app = self.app
         if not self.design["layers"]:
             messagebox.showinfo("Empty design", "Add something to the design first (Add).")
             return
-        d = self.design
+        d = D.scaled_design(self.design, factor) if factor else copy.deepcopy(self.design)
         name = os.path.splitext(os.path.basename(self.project_path))[0] if self.project_path else "design"
-        out = os.path.join(app.out_dir.get(), f"{name}_{d['material']}_{d['canvas']['width_in']:g}x"
-                                               f"{d['canvas']['height_in']:g}in_{d['dpi']}dpi.png")
-        snap = copy.deepcopy(d)
-        app.set_status("Saving engraving…")
+        w, h = round(d["canvas"]["width_in"], 2), round(d["canvas"]["height_in"], 2)
+        out = os.path.join(app.out_dir.get(), f"{name}_{d['material']}_{w:g}x{h:g}in_{d['dpi']}dpi"
+                                               f"{'_test' if factor else ''}.png")
+        snap, renderer = d, D.Renderer() if factor else self.renderer
+        app.set_status("Saving test copy…" if factor else "Saving engraving…")
 
         def job():
             try:
-                files = D.save_engraving(snap, self.renderer, out)
+                files = D.save_engraving(snap, renderer, out)
                 names = ", ".join(os.path.basename(f) for f in files) or "nothing (design is empty)"
                 app.results.put(("status", f"Saved {names}"))
             except Exception as e:

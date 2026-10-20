@@ -188,6 +188,15 @@ exports a single engraving, so you don't need Inkscape for the layout step.
    pushed out by the offset. Mirror is applied to the engraving and the cut lines together, so
    text reads correctly from the front of back-engraved acrylic.
 
+   **Test copy:** set **Test copy size (%)** on the Design tab and click **Save test copy** to
+   save the whole design shrunk down (files end in `_test`), to try on scrap before a big job.
+   DPI, material and photo settings stay the same, so the dots burn like the real thing.
+
+   **In your laser software,** engrave the PNG at the same resolution it was saved at (254 DPI
+   = 100 lines/cm = 0.1 mm line interval) and turn the software's own dithering off (use a
+   plain black-and-white / threshold mode). If the software resamples or re-dithers the
+   already-dithered image, you get blotchy, boxy patches.
+
 **Projects:** **Save** / **Save as…** write a `.lep` project file. It's self-contained (it includes
 copies of every image and all photo fixes), so it still opens if the originals move, or on
 another PC. **Open…** loads one. Your current design is also remembered when you close the app,

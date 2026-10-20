@@ -514,6 +514,25 @@ class Renderer:
 
 CUT_FORMATS = {"none": (), "svg": ("svg",), "dxf": ("dxf",), "svg+dxf": ("svg", "dxf")}
 
+# Length fields (inches / mm / points) that shrink with the design for a test copy.
+# DPI, tone settings and dithering stay the same, so the dots burn like the real job.
+_SCALED_DESIGN = ("outline_offset_in",)
+_SCALED_LAYER = ("x_in", "y_in", "w_in", "h_in", "size_pt", "radius_in", "corner_in", "stroke_mm")
+
+
+def scaled_design(design, factor):
+    """A copy of the design shrunk (or grown) by `factor`, for a small test burn."""
+    d = copy.deepcopy(design)
+    d["canvas"] = {k: v * factor for k, v in d["canvas"].items()}
+    for f in _SCALED_DESIGN:
+        if f in d:
+            d[f] *= factor
+    for layer in d["layers"]:
+        for f in _SCALED_LAYER:
+            if f in layer:
+                layer[f] *= factor
+    return d
+
 
 def all_cut_paths(design, renderer, cover):
     """Every cut line in the design (Cut items + the optional outline), canvas inches.
