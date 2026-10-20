@@ -35,3 +35,11 @@ Desktop app (tkinter) for preparing photos for laser engraving. See README.md fo
 - `LaserEngraver.exe --selftest <report.txt>` runs photo, comic, and rembg headlessly; build.py runs it and refuses to make an installer if it fails. If you add a library, check it still passes.
 - Bump `VERSION` in `engrave_core.py` for each release; the installer reads it. Keep the `AppId` GUID in `installer.iss` unchanged so upgrades replace the old install.
 - Run with plain `python` (not `python -I`): packages are in user site-packages.
+
+## Web version (`web/`)
+- Static site, no build step: `web/worker.js` runs Pyodide 0.27.7 (NumPy, OpenCV 4.10, Pillow 10.2) and loads the repo's own `../engrave_core.py` and `../materials.json` via `web/engine.py`. Keep `engrave_core.py` importable without tkinter, numba or rembg (all are optional/lazy there) or the web version breaks. Test locally with the `laserengraver-web` launch config (http.server on port 8800 serving this folder; open `/web/`).
+- `engine.py` swaps Stucki for the JS loop `stuckiJS` in worker.js (same float64 math) and copies rembg's U2netSession pre/post-processing around onnxruntime-web 1.20.1. If you change `_stucki_loop`, change `stuckiJS` too.
+- Verified: photo style pixel-identical to desktop (all dithers, crop/rotate); u2net mask within 1/255; comic differs ~0.01% of pixels above 1200 px (cv2.resize/bilateral in the WASM build). Re-check with a desktop-vs-browser hash comparison after pipeline changes.
+- Model: `web/models/u2net.onnx.part*` + `u2net.json` (sha256), made by `web/tools/split_model.py`; parts < 50 MB for GitHub. The worker caches them in Cache Storage (`laser-engraver-models-v1`); bump that name if the model files change. rembg's GitHub release can't be fetched from a browser (no CORS).
+- UI is separate from the desktop's (no shared UI code): `index.html`, `app.js` (settings panels, presets/materials in localStorage, canvas preview), `style.css` (same palette as `ui_kit.PALETTES`, light/dark). Crop/rotate are per photo; everything else is global, like the desktop. Phase 1 has no fix strokes and no Design mode.
+- Hosting: GitHub Pages from the repo root; root `index.html` redirects to `web/`.

@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Laser Engraver</title>
+<meta name="description" content="Turn photos into laser engraving files in your browser. Nothing is uploaded.">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><img src="icon.svg" alt="" width="22" height="22"> Laser Engraver <span class="badge">web</span></div>
+  <div class="actions">
+    <label class="btn primary" title="Open photos (or drop them anywhere on the page)">
+      Open photos<input id="fileInput" type="file" accept="image/*" multiple hidden>
+    </label>
+    <button id="downloadBtn" class="btn" disabled title="Download the engraving PNG for the selected photo">Download PNG</button>
+    <button id="downloadAllBtn" class="btn" disabled title="Download engravings for every open photo">Download all</button>
+    <span class="sep"></span>
+    <button id="themeBtn" class="btn ghost" title="Light / dark theme">◐</button>
+    <button id="helpBtn" class="btn ghost">Help</button>
+  </div>
+</header>
+
+<div class="layout">
+  <aside class="side">
+    <section class="files">
+      <div class="files-head"><span>Photos</span><button id="clearBtn" class="link" hidden>Clear all</button></div>
+      <ul id="fileList" class="file-list"></ul>
+      <p id="filesEmpty" class="hint">No photos yet. Use <b>Open photos</b> or drop them here.</p>
+    </section>
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-tab="basic" role="tab">Basic</button>
+      <button class="tab" data-tab="photo" role="tab">Photo tuning</button>
+      <button class="tab" data-tab="comic" role="tab">Comic tuning</button>
+    </nav>
+    <div class="panes">
+      <div class="pane active" id="pane-basic"></div>
+      <div class="pane" id="pane-photo"></div>
+      <div class="pane" id="pane-comic"></div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="viewbar">
+      <div class="seg" id="views" role="radiogroup">
+        <button data-view="original">Original</button>
+        <button data-view="adjusted">Adjusted</button>
+        <button data-view="engraving" class="active">Engraving</button>
+        <button data-view="look">Material look</button>
+      </div>
+      <label class="check" title="Show the original photo left of a divider that follows the mouse">
+        <input type="checkbox" id="compare"> Compare</label>
+      <div class="zoom">
+        <button class="btn ghost sm" id="zoomOut" title="Zoom out">−</button>
+        <button class="btn ghost sm" id="zoomFit" title="Fit to window">Fit</button>
+        <button class="btn ghost sm" id="zoom100" title="Actual pixels (1 laser dot = 1 screen pixel)">1:1</button>
+        <button class="btn ghost sm" id="zoomIn" title="Zoom in">+</button>
+      </div>
+    </div>
+    <div class="stage" id="stage">
+      <canvas id="canvas"></canvas>
+      <div id="drop" class="drop">Drop photos to open them</div>
+      <div id="empty" class="empty">
+        <h2>Photos to laser engravings, in your browser</h2>
+        <p>Open a photo to start. Everything runs on this computer: <b>nothing is uploaded</b>.</p>
+      </div>
+    </div>
+    <div class="infobar"><span id="info"></span></div>
+  </main>
+</div>
+
+<footer class="status">
+  <span id="status">Starting…</span>
+  <div class="bar" id="bar" hidden><div></div></div>
+  <span class="grow"></span>
+  <span id="estimate" class="muted"></span>
+  <label class="speed" title="Your laser's engraving speed, for the time estimate">Speed
+    <input id="speed" type="number" min="1" max="2000" step="10" value="300"> mm/s</label>
+</footer>
+
+<div id="loading" class="overlay">
+  <div class="card">
+    <h2>Laser Engraver</h2>
+    <p id="loadText">Loading…</p>
+    <div class="bar wide"><div id="loadBar"></div></div>
+    <p class="hint">The first visit downloads about 20 MB; after that it opens faster.</p>
+  </div>
+</div>
+
+<dialog id="help">
+  <form method="dialog" class="dlg">
+    <h2>How to use</h2>
+    <ol>
+      <li><b>Open photos</b> (or drop them on the page). Click one in the list to work on it.</li>
+      <li>On <b>Basic</b>, pick the style (Photo or Comic), the material and the size. The
+        material sets contrast, brightness, gamma, invert and mirror for you.</li>
+      <li>Check the <b>Engraving</b> view (the real laser dots; zoom in) and <b>Material look</b>.</li>
+      <li><b>Download PNG</b> and load it into your laser software.</li>
+    </ol>
+    <h3>In your laser software</h3>
+    <p>Engrave the PNG at the same resolution it was made at (254 DPI = 100 lines/cm = 0.1 mm
+      line interval) and turn the software's own dithering off (use a plain black-and-white or
+      threshold mode). The image is already dithered; resampling or re-dithering it makes
+      blotchy, boxy patches.</p>
+    <h3>Remove background</h3>
+    <p>Uses an AI model that downloads once (176 MB) and then stays in your browser. Removal
+      takes a few seconds per photo.</p>
+    <h3>Tips</h3>
+    <ul>
+      <li>Mouse wheel zooms, drag to pan. <b>1:1</b> shows one laser dot per screen pixel.</li>
+      <li>Not sure about contrast or gamma? Burn a small test on scrap first.</li>
+      <li>Presets and your own materials are saved in this browser only.</li>
+    </ul>
+    <h3>Privacy</h3>
+    <p>Photos never leave your computer. The page and the AI model are downloaded; your images
+      are processed locally.</p>
+    <p class="hint" id="versionLine"></p>
+    <div class="dlg-actions"><button class="btn primary">Close</button></div>
+  </form>
+</dialog>
+
+<script src="app.js"></script>
+</body>
+</html>

@@ -8,6 +8,45 @@ A desktop app that turns photos into 1-bit engraving files. Two styles:
 - **Comic**: flat tones filled with halftone dots and crosshatching, plus bold ink outlines.
   Less realistic, more graphic, and much faster to burn.
 
+There are two versions that share the same processing code (`engrave_core.py`):
+
+- **Desktop app** (Windows): everything, including background-removal fixes and Design mode.
+- **Web version** (`web/`): runs in any modern browser with nothing to install, for sharing
+  (e.g. a makerspace). Photo and comic styles, AI background removal, presets, materials and
+  PNG / outline downloads. Photos are processed on the viewer's own computer, never uploaded.
+
+## Web version
+
+Open `web/index.html` through a web server (it can't run from a double-clicked file, because
+browsers block the worker and model files there). On GitHub Pages it's served from this repo's
+root; the root `index.html` forwards to `web/`.
+
+To try it locally:
+
+```bash
+python -m http.server 8800
+```
+
+then open http://localhost:8800/web/.
+
+How it works:
+
+- `web/worker.js` loads [Pyodide](https://pyodide.org) (Python in WebAssembly) with NumPy,
+  OpenCV and Pillow, then runs this folder's own `engrave_core.py` through `web/engine.py`.
+  Any change to `engrave_core.py` or `materials.json` reaches the web version on the next push.
+- Stucki dithering is a small JavaScript loop in `worker.js` (numba doesn't run in browsers),
+  with the same math. Photo-style output is pixel-identical to the desktop app. Comic style
+  can differ in about 0.01% of pixels on images over 1200 px, from OpenCV's browser build.
+- Background removal runs the same u2net model with onnxruntime-web. The model is stored in
+  `web/models/` in pieces (see its README), downloaded once and cached by the browser.
+  Masks match the desktop's to within 1 level out of 255. About 7 s per photo.
+- Presets, your own materials, settings and theme are saved in the browser (localStorage).
+- The interface (`web/index.html`, `app.js`, `style.css`) is separate from the desktop's, so
+  new interface features have to be added to each version.
+
+First visit downloads about 20 MB (Python + libraries, from the jsDelivr CDN); the AI model
+(176 MB) downloads the first time someone removes a background.
+
 ## Install it (normal use)
 
 Run **`installer\LaserEngraver-Setup-<version>.exe`**. It installs for your user only (no admin
@@ -353,6 +392,8 @@ Run `python engrave_core.py -h` for all options.
 | `materials.json` | Material profiles. |
 | `settings.json` | Remembers your last settings and file list (created automatically, not in git). |
 | `output/` | Default save folder (not in git). |
+| `index.html` | Forwards to the web version (for GitHub Pages). |
+| `web/` | The web version: page (`index.html`, `app.js`, `style.css`), `worker.js` (Pyodide + AI model), `engine.py` (glue to `engrave_core`), `models/` (u2net in pieces), `tools/split_model.py`. |
 
 ## License
 

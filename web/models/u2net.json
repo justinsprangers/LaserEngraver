@@ -1,0 +1,11 @@
+{
+  "model": "u2net",
+  "size": 175997641,
+  "sha256": "8d10d2f3bb75ae3b6d527c77944fc5e7dcd94b29809d47a739a7a728a912b491",
+  "parts": [
+    "u2net.onnx.part0",
+    "u2net.onnx.part1",
+    "u2net.onnx.part2",
+    "u2net.onnx.part3"
+  ]
+}
