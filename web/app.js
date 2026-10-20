@@ -154,15 +154,15 @@ function buildBasic(p) {
     styles.append(el("label", { className: "check" }, r, " " + t));
   }
   s.append(el("div", { className: "row wide" }, el("label", { textContent: "Style" }), styles));
-  const mat = el("select");
+  const mat = el("select", { id: "materialSelect" });
   mat.addEventListener("change", () => change("material", mat.value));
   controls.push({ key: "material", set: (v) => { refreshMaterialList(mat); mat.value = v; } });
   s.append(el("div", { className: "row wide" }, el("label", { textContent: "Material" }), mat));
   const links = el("div", { className: "line" });
-  for (const [t, fn, tip] of [["Reset", resetMaterial, "Put back this material's saved tone settings"],
-    ["Save as…", saveMaterial, "Save the tone settings below as a material"],
-    ["Rename…", renameMaterial, ""], ["Delete", deleteMaterial, ""]]) {
-    const b = el("button", { className: "link", textContent: t, title: tip, type: "button" });
+  for (const [t, fn, tip, edit] of [["Reset", resetMaterial, "Put back this material's saved tone settings"],
+    ["Save as…", saveMaterial, "Save the tone settings below as your own material"],
+    ["Rename…", renameMaterial, "", true], ["Delete", deleteMaterial, "", true]]) {
+    const b = el("button", { className: "link" + (edit ? " mat-edit" : ""), textContent: t, title: tip, type: "button" });
     b.addEventListener("click", fn);
     links.append(b);
   }
@@ -323,6 +323,7 @@ function change(key, value) {
   }
   refreshPresetMarks();
   refreshHints();
+  refreshFixbar();
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => LS.set("settings", S), 400);
   scheduleRender();
@@ -361,17 +362,40 @@ function refreshCrop() {
 
 // ============================================================ materials
 
+// Built-in materials (materials.json) are read-only here; your own live in this browser and
+// can't reuse a built-in name, so a shared computer always has the original profiles.
+let myMaterials = {};
 function loadMaterials(builtin) {
   builtinMaterials = builtin;
-  const mine = LS.get("materials", null);
-  materials = mine && Object.keys(mine).length ? mine : structuredClone(builtin);
+  myMaterials = LS.get("myMaterials", null);
+  if (!myMaterials) {                       // older versions stored one combined list
+    const old = LS.get("materials", {}) || {};
+    myMaterials = Object.fromEntries(Object.entries(old).filter(([k]) => !(k in builtin)));
+    LS.set("myMaterials", myMaterials);
+    LS.set("materials", null);
+  }
+  for (const k of Object.keys(myMaterials)) if (k in builtin) delete myMaterials[k];
+  materials = { ...structuredClone(builtin), ...myMaterials };
 }
-function storeMaterials() { LS.set("materials", materials); }
+function storeMaterials() {
+  LS.set("myMaterials", myMaterials);
+  materials = { ...structuredClone(builtinMaterials), ...myMaterials };
+}
+const isBuiltin = (name) => name in builtinMaterials;
 function refreshMaterialList(sel) {
-  sel = sel || document.querySelector("#pane-basic select");
-  const names = Object.keys(materials).sort();
-  if ([...sel.options].map((o) => o.value).join() !== names.join()) {
-    sel.replaceChildren(...names.map((n) => el("option", { value: n, textContent: n })));
+  sel = sel || $("#materialSelect");
+  const builtin = Object.keys(builtinMaterials).sort(), mine = Object.keys(myMaterials).sort();
+  const sig = builtin.join() + "|" + mine.join();
+  if (sel.dataset.sig !== sig) {
+    const group = (label, names) => el("optgroup", { label },
+      ...names.map((n) => el("option", { value: n, textContent: n })));
+    sel.replaceChildren(group("Built-in", builtin), ...(mine.length ? [group("My materials", mine)] : []));
+    sel.dataset.sig = sig;
+  }
+  const locked = isBuiltin(S.material);
+  for (const b of document.querySelectorAll(".mat-edit")) {
+    b.disabled = locked;
+    b.title = locked ? "Built-in materials can't be renamed or deleted. Use Save as… to make your own copy." : "";
   }
 }
 function applyMaterialProfile() {
@@ -386,11 +410,13 @@ function materialName(text) {
 }
 function resetMaterial() { applyMaterialProfile(); refreshControls(); scheduleRender(); }
 function saveMaterial() {
-  const name = materialName(prompt("Name for this material profile (e.g. maple, black acrylic):", S.material) || "");
+  const suggest = isBuiltin(S.material) ? `my_${S.material}` : S.material;
+  const name = materialName(prompt("Name for your material (e.g. maple, black acrylic):", suggest) || "");
   if (!name) return;
-  if (materials[name] && !confirm(`'${name}' already exists. Overwrite its settings?`)) return;
+  if (isBuiltin(name)) return alert(`'${name}' is a built-in material and can't be changed. Pick another name.`);
+  if (myMaterials[name] && !confirm(`'${name}' already exists. Overwrite its settings?`)) return;
   const look = (materials[S.material] || {}).look || ["#d9b38c", "#5a3a22"];
-  materials[name] = { ...Object.fromEntries(MATERIAL_KEYS.map((k) => [k, S[k]])), look };
+  myMaterials[name] = { ...Object.fromEntries(MATERIAL_KEYS.map((k) => [k, S[k]])), look };
   storeMaterials();
   S.material = name;
   refreshControls();
@@ -399,10 +425,11 @@ function saveMaterial() {
 }
 function renameMaterial() {
   const old = S.material;
+  if (isBuiltin(old)) return;
   const name = materialName(prompt(`New name for '${old}':`, old) || "");
   if (!name || name === old) return;
   if (materials[name]) return alert(`There's already a material called '${name}'.`);
-  materials = Object.fromEntries(Object.entries(materials).map(([k, v]) => [k === old ? name : k, v]));
+  myMaterials = Object.fromEntries(Object.entries(myMaterials).map(([k, v]) => [k === old ? name : k, v]));
   storeMaterials();
   S.material = name;              // same settings, new name
   refreshControls();
@@ -411,11 +438,11 @@ function renameMaterial() {
 }
 function deleteMaterial() {
   const name = S.material;
-  if (Object.keys(materials).length <= 1) return alert("You need at least one material.");
-  if (!confirm(`Delete the material '${name}'?`)) return;
-  delete materials[name];
+  if (isBuiltin(name)) return;
+  if (!confirm(`Delete your material '${name}'?`)) return;
+  delete myMaterials[name];
   storeMaterials();
-  change("material", Object.keys(materials).sort()[0]);
+  change("material", Object.keys(builtinMaterials).includes("wood") ? "wood" : Object.keys(materials).sort()[0]);
   setStatus(`Deleted material '${name}'`);
 }
 
@@ -500,7 +527,7 @@ async function openFiles(list) {
     const bytes = new Uint8Array(await file.arrayBuffer());
     try {
       const r = await call("open", { id, name: file.name, bytes }, [bytes.buffer]);
-      const f = { id, name: file.name, url: URL.createObjectURL(file), w: r.w, h: r.h, crop: blankCrop() };
+      const f = { id, name: file.name, url: URL.createObjectURL(file), w: r.w, h: r.h, crop: blankCrop(), strokes: [] };
       files.push(f);
       first = first || f;
     } catch (e) {
@@ -537,6 +564,7 @@ function selectFile(f) {
   needFit = true;
   renderFileList();
   refreshCrop();
+  refreshFixbar();
   draw();
   scheduleRender(0);
 }
@@ -555,6 +583,7 @@ function closeFile(f) {
   }
   renderFileList();
   refreshCrop();
+  refreshFixbar();
   draw();
 }
 
@@ -577,12 +606,12 @@ async function renderNow() {
   const f = current, t0 = performance.now();
   showProgress(S.remove_bg && !modelCached ? "Preparing the AI model…" : "Processing…", null);
   try {
-    const r = await call("render", { id: f.id, settings: jobSettings(f) });
+    const r = await call("render", { id: f.id, settings: jobSettings(f), strokes: f.strokes });
     if (S.remove_bg) { modelCached = true; refreshHints(); }
     if (f === current) {
       views = r;
       viewCache = {};
-      if (needFit) { fit(); needFit = false; }
+      if (needFit) fit();
       draw();
       updateInfo();
       setStatus(`Ready (${((performance.now() - t0) / 1000).toFixed(1)} s)`);
@@ -624,8 +653,22 @@ const canvas = $("#canvas"), ctx = canvas.getContext("2d");
 let zoom = 1, panX = 0, panY = 0, mouseX = null;
 
 function hexRGB(h) { const n = parseInt(h.slice(1), 16); return [n >> 16, (n >> 8) & 255, n & 255]; }
+// The Cut-out view is the uncropped source photo (up to 1600 px); the others are the engraving.
+function viewSize(name = view) {
+  return name === "cutout" && views.cutout ? views.cutout : views;
+}
 function viewCanvas(name) {
   if (viewCache[name]) return viewCache[name];
+  if (name === "cutout") {
+    const { w, h, rgb } = views.cutout;
+    const c = el("canvas", { width: w, height: h }), cx = c.getContext("2d");
+    const img = cx.createImageData(w, h), d = img.data;
+    for (let i = 0, j = 0; i < w * h; i++, j += 3) {
+      d[i * 4] = rgb[j]; d[i * 4 + 1] = rgb[j + 1]; d[i * 4 + 2] = rgb[j + 2]; d[i * 4 + 3] = 255;
+    }
+    cx.putImageData(img, 0, 0);
+    return (viewCache[name] = c);
+  }
   const { w, h } = views;
   const c = el("canvas", { width: w, height: h });
   const cx = c.getContext("2d"), img = cx.createImageData(w, h), d = img.data;
@@ -659,11 +702,17 @@ function draw() {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   if (!views || !current) return;
+  if (view === "cutout" && !views.cutout) return;
   const dots = view === "engraving" || view === "look";
   ctx.imageSmoothingEnabled = !(dots && zoom * dpr >= 1);
   ctx.imageSmoothingQuality = "high";
   ctx.setTransform(dpr * zoom, 0, 0, dpr * zoom, dpr * panX, dpr * panY);
   ctx.drawImage(viewCanvas(view), 0, 0);
+  if (view === "cutout") {
+    drawStrokes();
+    drawBrush(dpr);
+    return;
+  }
   if ($("#compare").checked && view !== "original" && mouseX != null) {
     // Original left of the divider, lined up with the shown view (mirrored views flip it too).
     const flip = views.mirror && view !== "look";
@@ -685,12 +734,97 @@ function draw() {
 
 function fit() {
   if (!views) return;
-  const W = canvas.clientWidth, H = canvas.clientHeight;
-  zoom = Math.min(W / views.w, H / views.h) * 0.94;
-  panX = (W - views.w * zoom) / 2;
-  panY = (H - views.h * zoom) / 2;
+  const W = canvas.clientWidth, H = canvas.clientHeight, { w, h } = viewSize();
+  if (!W || !H) { needFit = true; return; }      // not laid out yet (hidden): fit when shown
+  needFit = false;
+  zoom = Math.min(W / w, H / h) * 0.94;
+  panX = (W - w * zoom) / 2;
+  panY = (H - h * zoom) / 2;
   draw();
 }
+
+// --- Fix strokes on the Cut-out view (same tools and stroke format as the desktop app)
+const STROKE_COLORS = { keep: "#22c55e", remove: "#ef4444", paint_keep: "#38bdf8", paint_remove: "#f59e0b" };
+let tool = "pan", live = null, mouse = null, spaceDown = false;
+const brush = $("#brush");
+brush.value = LS.get("brush", 30);
+
+function drawing() {
+  return tool !== "pan" && view === "cutout" && views && views.cutout && S.remove_bg && current && zoom > 0;
+}
+function toSrc(sx, sy) {           // screen (CSS px in the canvas) -> source-image pixels
+  const f = views.cutout.factor;
+  return [+((sx - panX) / zoom * f).toFixed(1), +((sy - panY) / zoom * f).toFixed(1)];
+}
+function strokePath(kind, radius, pts) {
+  // Drawn in view pixels (the transform is already applied).
+  const f = views.cutout.factor;
+  ctx.strokeStyle = ctx.fillStyle = STROKE_COLORS[kind];
+  ctx.lineWidth = Math.max(2 / zoom, 2 * radius / f);
+  ctx.lineCap = ctx.lineJoin = "round";
+  ctx.beginPath();
+  ctx.moveTo(pts[0][0] / f, pts[0][1] / f);
+  if (pts.length === 1) ctx.lineTo(pts[0][0] / f + 0.01, pts[0][1] / f);
+  for (const [x, y] of pts.slice(1)) ctx.lineTo(x / f, y / f);
+  ctx.stroke();
+}
+function drawStrokes() {
+  ctx.save();
+  ctx.globalAlpha = 0.4;
+  for (const [kind, radius, pts] of current.strokes) strokePath(kind, radius, pts);
+  if (live) {
+    ctx.globalAlpha = 0.6;
+    strokePath(live.kind, brushRadius(), live.pts);
+  }
+  ctx.restore();
+}
+function brushRadius() { return +(brush.value / 2 / zoom * views.cutout.factor).toFixed(1); }
+function drawBrush(dpr) {
+  if (!mouse || !drawing()) return;
+  const r = Math.max(1, brush.value / 2);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = "#fff";
+  ctx.beginPath(); ctx.arc(mouse[0], mouse[1], r + 1, 0, 7); ctx.stroke();
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = STROKE_COLORS[tool];
+  ctx.beginPath(); ctx.arc(mouse[0], mouse[1], r, 0, 7); ctx.stroke();
+}
+function setTool(t) {
+  if (t !== "pan" && !(S.remove_bg && current)) return;      // fix tools need Remove background
+  tool = t;
+  for (const b of document.querySelectorAll("#tools button")) b.classList.toggle("active", b.dataset.tool === t);
+  if (t !== "pan" && view !== "cutout") setView("cutout");
+  canvas.classList.toggle("drawing", t !== "pan");
+  draw();
+}
+function strokesChanged() {
+  refreshFixbar();
+  scheduleRender(0);
+}
+function undoStroke() {
+  if (current && current.strokes.length) { current.strokes.pop(); strokesChanged(); }
+}
+function clearStrokes() {
+  if (current && current.strokes.length && confirm("Remove all background fixes on this photo?")) {
+    current.strokes = [];
+    strokesChanged();
+  }
+}
+function refreshFixbar() {
+  const on = !!(S.remove_bg && current);
+  $("#fixbar").hidden = !on;
+  $("#cutoutBtn").hidden = !S.remove_bg;
+  if (!S.remove_bg && view === "cutout") setView("engraving");
+  if (!on && tool !== "pan") setTool("pan");
+  const n = current ? current.strokes.length : 0;
+  $("#fixCount").textContent = `${n} fix${n === 1 ? "" : "es"} ⓘ`;
+  $("#undoBtn").disabled = $("#clearFixBtn").disabled = !n;
+}
+for (const b of document.querySelectorAll("#tools button")) b.addEventListener("click", () => setTool(b.dataset.tool));
+$("#undoBtn").addEventListener("click", undoStroke);
+$("#clearFixBtn").addEventListener("click", clearStrokes);
+brush.addEventListener("input", () => { LS.set("brush", +brush.value); draw(); });
 function zoomAt(sx, sy, factor) {
   const nz = Math.min(64, Math.max(0.02, zoom * factor));
   panX = sx - (sx - panX) * (nz / zoom);
@@ -705,20 +839,45 @@ canvas.addEventListener("wheel", (e) => {
   zoomAt(e.clientX - r.left, e.clientY - r.top, Math.pow(1.0015, -e.deltaY));
 }, { passive: false });
 let drag = null;
+canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 canvas.addEventListener("pointerdown", (e) => {
-  drag = { x: e.clientX, y: e.clientY, px: panX, py: panY };
   canvas.setPointerCapture(e.pointerId);
+  const r = canvas.getBoundingClientRect(), sx = e.clientX - r.left, sy = e.clientY - r.top;
+  if (e.button === 0 && !spaceDown && drawing()) {
+    live = { kind: tool, sx, sy, pts: [toSrc(sx, sy)] };
+    draw();
+    return;
+  }
+  drag = { x: e.clientX, y: e.clientY, px: panX, py: panY };       // left drag, right drag, Space
   canvas.classList.add("panning");
 });
 canvas.addEventListener("pointermove", (e) => {
-  mouseX = e.clientX - canvas.getBoundingClientRect().left;
-  if (drag) { panX = drag.px + e.clientX - drag.x; panY = drag.py + e.clientY - drag.y; }
-  if (drag || $("#compare").checked) draw();
+  const r = canvas.getBoundingClientRect(), sx = e.clientX - r.left, sy = e.clientY - r.top;
+  mouseX = sx;
+  mouse = [sx, sy];
+  if (live) {
+    if (Math.abs(sx - live.sx) + Math.abs(sy - live.sy) >= 3) {
+      live.sx = sx; live.sy = sy;
+      live.pts.push(toSrc(sx, sy));
+    }
+  } else if (drag) {
+    panX = drag.px + e.clientX - drag.x;
+    panY = drag.py + e.clientY - drag.y;
+  }
+  if (live || drag || $("#compare").checked || drawing()) draw();
 });
-canvas.addEventListener("pointerup", () => { drag = null; canvas.classList.remove("panning"); });
-canvas.addEventListener("pointerleave", () => { mouseX = null; if ($("#compare").checked) draw(); });
+canvas.addEventListener("pointerup", () => {
+  if (live) {
+    current.strokes.push([live.kind, brushRadius(), live.pts]);
+    live = null;
+    strokesChanged();
+  }
+  drag = null;
+  canvas.classList.remove("panning");
+});
+canvas.addEventListener("pointerleave", () => { mouseX = null; mouse = null; draw(); });
 canvas.addEventListener("dblclick", fit);
-new ResizeObserver(() => draw()).observe(canvas);
+new ResizeObserver(() => (needFit && views ? fit() : draw())).observe(canvas);
 
 $("#zoomFit").addEventListener("click", fit);
 $("#zoomIn").addEventListener("click", () => zoomAt(canvas.clientWidth / 2, canvas.clientHeight / 2, 1.25));
@@ -727,10 +886,13 @@ $("#zoom100").addEventListener("click", () => zoomAt(canvas.clientWidth / 2, can
 $("#compare").addEventListener("change", draw);
 
 function setView(v) {
+  if (v === "cutout" && !S.remove_bg) v = "engraving";
+  const refit = (v === "cutout") !== (view === "cutout");   // different framing: fit again
   view = v;
-  LS.set("view", v);
+  if (v !== "cutout") LS.set("view", v);
   for (const b of document.querySelectorAll("#views button")) b.classList.toggle("active", b.dataset.view === v);
-  draw();
+  if (v !== "cutout" && tool !== "pan") setTool("pan");
+  if (refit && views) fit(); else draw();
 }
 for (const b of document.querySelectorAll("#views button")) b.addEventListener("click", () => setView(b.dataset.view));
 
@@ -744,7 +906,7 @@ function saveBlob(blob, name) {
   setTimeout(() => URL.revokeObjectURL(a.href), 4000);
 }
 async function exportFile(f) {
-  const r = await call("export", { id: f.id, settings: jobSettings(f) });
+  const r = await call("export", { id: f.id, settings: jobSettings(f), strokes: f.strokes });
   saveBlob(new Blob([r.png], { type: "image/png" }), r.filename);
   if (r.svg) saveBlob(new Blob([r.svg], { type: "image/svg+xml" }), r.filename.replace(/\.png$/, "_outline.svg"));
   return r;
@@ -812,13 +974,28 @@ const speed = $("#speed");
 speed.value = LS.get("speed", 300);
 speed.addEventListener("change", () => { LS.set("speed", +speed.value); updateEstimate(); });
 
+// Same keys as the desktop app's defaults where they exist.
 window.addEventListener("keydown", (e) => {
-  if (e.target.matches("input, select, textarea")) return;
-  const keys = { "1": "original", "2": "adjusted", "3": "engraving", "4": "look" };
-  if (keys[e.key]) setView(keys[e.key]);
-  else if (e.key === "f" || e.key === "0") fit();
+  if (e.target instanceof Element && e.target.matches("input[type=number], input[type=text], select, textarea")) return;
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { e.preventDefault(); undoStroke(); return; }
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  const viewKeys = { "1": "original", "2": "adjusted", "3": "engraving", "4": "look", "5": "cutout" };
+  const toolKeys = { k: "keep", r: "remove", b: "paint_keep", e: "paint_remove", p: "pan" };
+  const k = e.key.toLowerCase();
+  if (viewKeys[e.key]) setView(viewKeys[e.key]);
+  else if (toolKeys[k]) setTool(toolKeys[k]);
+  else if (e.key === "[" || e.key === "]") {
+    brush.value = Math.min(100, Math.max(2, Math.round(brush.value * (e.key === "]" ? 1.2 : 1 / 1.2))));
+    LS.set("brush", +brush.value);
+    draw();
+  } else if (e.key === " ") { e.preventDefault(); spaceDown = true; canvas.classList.add("panning"); }
+  else if (e.key === "Escape") setTool("pan");
+  else if (k === "f" || e.key === "0") fit();
   else if (e.key === "+" || e.key === "=") $("#zoomIn").click();
   else if (e.key === "-") $("#zoomOut").click();
+});
+window.addEventListener("keyup", (e) => {
+  if (e.key === " ") { spaceDown = false; canvas.classList.remove("panning"); }
 });
 
 // ============================================================ start
@@ -843,6 +1020,7 @@ window.addEventListener("keydown", (e) => {
     $("#versionLine").textContent = `Laser Engraver ${DEF.version} (web). Same processing engine as the desktop app.`;
     modelCached = await call("hasModel").catch(() => false);
     refreshHints();
+    refreshFixbar();
     $("#loading").classList.add("hidden");
     renderFileList();
     setStatus("Ready. Open photos to start.");

@@ -46,7 +46,8 @@ def open_file(fid, name, data):
     with open(path, "wb") as f:
         f.write(bytes(data.to_py()))
     gray = core.load_image(path)          # raises if it isn't an image
-    _files[fid] = {"name": name, "path": path, "gray": gray, "rgb": None, "alpha": None}
+    _files[fid] = {"name": name, "path": path, "gray": gray, "rgb": None, "alpha": None,
+                   "steps": {}, "refined": None}
     return _js({"w": gray.width, "h": gray.height})
 
 
@@ -85,13 +86,43 @@ def cutout_output(fid, pred):
     f["alpha"] = mask.resize(f["rgb"].size, Image.Resampling.LANCZOS)
 
 
+# --- Fix strokes ------------------------------------------------------------------------------
+# Strokes are the desktop's format: [kind, radius, [[x, y], ...]] in source-image pixels.
+# core.refine_alpha applies them in order (direction-locked), reusing results for each prefix
+# of the list, so adding or undoing one stroke only computes one step.
+
+def _refined(f, strokes):
+    """(cut-out alpha with the strokes applied, the subject on white as grayscale)."""
+    strokes = [(k, float(r), [(float(x), float(y)) for x, y in pts]) for k, r, pts in strokes]
+    key = core.stroke_key(strokes)
+    if f["refined"] is None or f["refined"][0] != key:
+        steps = f["steps"]
+        if len(steps) > 40:                       # keep memory in check on long fix sessions
+            steps.clear()
+        alpha = core.refine_alpha(f["rgb"], f["alpha"], strokes, steps) if strokes else f["alpha"]
+        f["refined"] = (key, alpha, core.compose_on_white(f["rgb"], alpha))
+    return f["refined"][1], f["refined"][2]
+
+
+def _cutout_view(rgb, alpha, max_side=1600):
+    """Same as the desktop's Cut-out view: the photo in color, removed areas tinted red."""
+    k = min(1.0, max_side / max(rgb.size))
+    size = (max(1, round(rgb.width * k)), max(1, round(rgb.height * k)))
+    im = rgb.resize(size, Image.Resampling.BILINEAR)
+    a = alpha.resize(size, Image.Resampling.BILINEAR)
+    tinted = Image.blend(im, Image.new("RGB", size, (190, 20, 20)), 0.6)
+    view = Image.composite(im, tinted, a)
+    return {"w": size[0], "h": size[1], "factor": rgb.width / size[0],
+            "rgb": to_js(memoryview(np.ascontiguousarray(np.array(view, dtype=np.uint8)).ravel()))}
+
+
 # --- Rendering -------------------------------------------------------------------------------
 
-def _process(fid, settings_json):
+def _process(fid, settings_json, strokes_json="[]"):
     f = _files[fid]
     s = core.Settings.from_dict(json.loads(settings_json))
     if s.remove_bg and f["alpha"] is not None:
-        src, alpha = core.compose_on_white(f["rgb"], f["alpha"]), f["alpha"]
+        alpha, src = _refined(f, json.loads(strokes_json))
     else:
         src, alpha = f["gray"], None
     src, alpha = core.prepare(src, alpha, s)
@@ -99,23 +130,27 @@ def _process(fid, settings_json):
     return s, src, gray, result, mask
 
 
-def render(fid, settings_json):
+def render(fid, settings_json, strokes_json="[]"):
     """All preview views plus what the page shows about the job."""
-    s, src, gray, result, mask = _process(fid, settings_json)
+    s, src, gray, result, mask = _process(fid, settings_json, strokes_json)
+    f = _files[fid]
     burn = np.array(result.convert("L")) < 128
     stats = core.raster_stats(burn)
     orig = src.resize(result.size, Image.Resampling.LANCZOS)   # same framing as the other views
-    return _js({
+    out = {
         "w": result.width, "h": result.height,
         "original": _pixels(orig), "adjusted": _pixels(gray), "engraving": _pixels(result),
         "stats": list(stats), "fill": float(burn.mean()), "mirror": bool(s.mirror),
-        "filename": core.output_filename(_files[fid]["name"], s),
-    })
+        "filename": core.output_filename(f["name"], s),
+    }
+    if s.remove_bg and f["refined"] is not None:
+        out["cutout"] = _js(_cutout_view(f["rgb"], f["refined"][1]))
+    return _js(out)
 
 
-def export(fid, settings_json):
+def export(fid, settings_json, strokes_json="[]"):
     """The engraving PNG (with its DPI) and, if asked for, the cut outline SVG."""
-    s, src, gray, result, mask = _process(fid, settings_json)
+    s, src, gray, result, mask = _process(fid, settings_json, strokes_json)
     buf = io.BytesIO()
     result.save(buf, "PNG", dpi=(s.dpi, s.dpi))
     out = {"png": to_js(memoryview(buf.getvalue())), "filename": core.output_filename(_files[fid]["name"], s)}

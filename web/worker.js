@@ -139,13 +139,14 @@ const handlers = {
   close: ({ id }) => engine.close_file(id),
   cutout: ({ id }) => cutout(id),
   hasModel: async () => !!(await (await caches.open(MODEL_CACHE)).keys()).length,
-  render: async ({ id, settings }) => {
+  render: async ({ id, settings, strokes = [] }) => {
     if (settings.remove_bg) await cutout(id);
-    return engine.render(id, JSON.stringify(settings));
+    if (settings.remove_bg && strokes.length) progress(`Applying fixes…`, null);
+    return engine.render(id, JSON.stringify(settings), JSON.stringify(strokes));
   },
-  export: async ({ id, settings }) => {
+  export: async ({ id, settings, strokes = [] }) => {
     if (settings.remove_bg) await cutout(id);
-    return engine.export(id, JSON.stringify(settings));
+    return engine.export(id, JSON.stringify(settings), JSON.stringify(strokes));
   },
 };
 

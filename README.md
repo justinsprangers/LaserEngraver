@@ -12,8 +12,9 @@ There are two versions that share the same processing code (`engrave_core.py`):
 
 - **Desktop app** (Windows): everything, including background-removal fixes and Design mode.
 - **Web version** (`web/`): runs in any modern browser with nothing to install, for sharing
-  (e.g. a makerspace). Photo and comic styles, AI background removal, presets, materials and
-  PNG / outline downloads. Photos are processed on the viewer's own computer, never uploaded.
+  (e.g. a makerspace). Photo and comic styles, AI background removal with the same fix tools
+  (smart keep / remove, brush keep / erase), presets, materials and PNG / outline downloads.
+  No Design mode yet. Photos are processed on the viewer's own computer, never uploaded.
 
 ## Web version
 
@@ -40,7 +41,11 @@ How it works:
 - Background removal runs the same u2net model with onnxruntime-web. The model is stored in
   `web/models/` in pieces (see its README), downloaded once and cached by the browser.
   Masks match the desktop's to within 1 level out of 255. About 7 s per photo.
-- Presets, your own materials, settings and theme are saved in the browser (localStorage).
+- Fix strokes use the desktop's format and `core.refine_alpha`, so they behave the same. They're
+  kept per photo until it's closed or the page is reloaded (photos aren't stored).
+- Presets, your own materials, settings and theme are saved in the browser (localStorage). The
+  built-in materials (`materials.json`) can't be renamed, deleted or overwritten in the web
+  version, so a shared computer always has the originals; **Save as…** makes a personal copy.
 - The interface (`web/index.html`, `app.js`, `style.css`) is separate from the desktop's, so
   new interface features have to be added to each version.
 

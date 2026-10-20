@@ -46,6 +46,7 @@
     <div class="viewbar">
       <div class="seg" id="views" role="radiogroup">
         <button data-view="original">Original</button>
+        <button data-view="cutout" id="cutoutBtn" hidden title="The photo with removed areas tinted red. Paint fixes here.">Cut-out</button>
         <button data-view="adjusted">Adjusted</button>
         <button data-view="engraving" class="active">Engraving</button>
         <button data-view="look">Material look</button>
@@ -58,6 +59,20 @@
         <button class="btn ghost sm" id="zoom100" title="Actual pixels (1 laser dot = 1 screen pixel)">1:1</button>
         <button class="btn ghost sm" id="zoomIn" title="Zoom in">+</button>
       </div>
+    </div>
+    <div class="fixbar" id="fixbar" hidden>
+      <span class="fix-label">Fix the cut-out:</span>
+      <div class="seg tools" id="tools" role="radiogroup">
+        <button data-tool="pan" class="active" title="Pan (P). Right-drag or Space+drag pans with any tool.">Pan</button>
+        <button data-tool="keep" title="Smart keep (K): paint on part of the subject that was removed. It re-cuts the whole connected region (e.g. a missing arm).">Smart keep</button>
+        <button data-tool="remove" title="Smart remove (R): paint on background that was kept. It re-cuts the whole connected region (e.g. a lamp post).">Smart remove</button>
+        <button data-tool="paint_keep" title="Brush keep (B): adds exactly what you paint, nothing else. For touch-ups after the smart tools.">Brush keep</button>
+        <button data-tool="paint_remove" title="Brush erase (E): removes exactly what you paint, nothing else. For touch-ups after the smart tools.">Brush erase</button>
+      </div>
+      <label class="size" title="Brush size ([ and ] change it)">Size <input type="range" id="brush" min="2" max="100" step="1"></label>
+      <button class="btn sm" id="undoBtn" title="Undo the last fix (Ctrl+Z)">Undo</button>
+      <button class="btn sm" id="clearFixBtn">Clear fixes</button>
+      <span class="hint" id="fixCount" title="Smart keep / remove (green / red): paint on a mistake and it re-cuts the whole wrong region. Keep only adds, Remove only takes away. Brush keep / erase (blue / orange): changes exactly the painted pixels. Strokes apply in order, so brush after the smart tools. Fixes are kept per photo until you close it or reload the page."></span>
     </div>
     <div class="stage" id="stage">
       <canvas id="canvas"></canvas>
@@ -107,11 +122,26 @@
     <h3>Remove background</h3>
     <p>Uses an AI model that downloads once (176 MB) and then stays in your browser. Removal
       takes a few seconds per photo.</p>
+    <p><b>Fixing mistakes:</b> with Remove background on, the <b>Cut-out</b> view shows removed
+      areas tinted red. Pick a tool above the preview and paint on the mistake:</p>
+    <ul>
+      <li><b>Smart keep</b> (green, K): paint on part of the subject that was removed; it brings
+        back the whole connected region. It only ever adds.</li>
+      <li><b>Smart remove</b> (red, R): paint on background that was kept; it removes the whole
+        connected region. It only ever takes away.</li>
+      <li><b>Brush keep / erase</b> (blue / orange, B / E): change exactly the pixels you paint,
+        for touch-ups after the smart tools.</li>
+    </ul>
+    <p>Fixes apply in order. <b>Undo</b> (Ctrl+Z) removes the last one. <b>[</b> and <b>]</b>
+      change the brush size; right-drag or Space+drag pans while a tool is active. Fixes stay
+      with the photo until you close it or reload the page.</p>
     <h3>Tips</h3>
     <ul>
-      <li>Mouse wheel zooms, drag to pan. <b>1:1</b> shows one laser dot per screen pixel.</li>
+      <li>Mouse wheel zooms, drag to pan. <b>1:1</b> shows one laser dot per screen pixel.
+        Keys 1–5 switch views, F fits.</li>
       <li>Not sure about contrast or gamma? Burn a small test on scrap first.</li>
-      <li>Presets and your own materials are saved in this browser only.</li>
+      <li>Presets and your own materials are saved in this browser only. The built-in
+        materials can't be changed; use <b>Save as…</b> to make your own version.</li>
     </ul>
     <h3>Privacy</h3>
     <p>Photos never leave your computer. The page and the AI model are downloaded; your images
