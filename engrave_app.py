@@ -158,14 +158,13 @@ class App(PanelsMixin, PreviewMixin, FixToolsMixin, KeysMixin):
         self.mode_frame = ttk.Frame(top)
         self.mode_frame.pack(side="left", padx=(0, 4))
         ttk.Label(self.mode_frame, text="Mode", style="Section.TLabel").pack(side="left", padx=(0, 8))
+        mode_seg = ui_kit.segmented(self.mode_frame)
+        mode_seg.pack(side="left")
         for text, val, tip in (("Photos", "photos", "Process photos one by one or in batches."),
                                ("Design", "design", "Lay out photos, logos, SVGs, text and shapes\n"
                                                     "into one engraving, and save it as a project.")):
-            rb = ttk.Radiobutton(self.mode_frame, text=text, value=val, variable=self.mode,
-                                 command=self.set_mode)
-            rb.pack(side="left", padx=(0, 8))
-            Tooltip(rb, tip)
-        ttk.Separator(self.mode_frame, orient="vertical").pack(side="left", fill="y", padx=(6, 12))
+            Tooltip(ui_kit.seg_button(mode_seg, text, val, self.mode, self.set_mode), tip)
+        ttk.Separator(self.mode_frame, orient="vertical").pack(side="left", fill="y", padx=(12, 12))
         self.file_toolbar = ttk.Frame(top)
         self.file_toolbar.pack(side="left")
         ttk.Button(self.file_toolbar, text="Add images…", command=self.add_images).pack(side="left")
@@ -276,18 +275,15 @@ class App(PanelsMixin, PreviewMixin, FixToolsMixin, KeysMixin):
         bar.pack(fill="x", pady=(0, 6))
         ttk.Label(bar, text="View", style="Section.TLabel").pack(side="left", padx=(0, 10))
         # Shown in Design mode only: Layout (fast, photos unprocessed) and Design (the engraving).
-        self.layout_radio = ttk.Radiobutton(bar, text="Layout", value="Layout", variable=self.view,
-                                            command=self.on_view_change)
-        self.design_radio = ttk.Radiobutton(bar, text="Design", value="Design", variable=self.view,
-                                            command=self.on_view_change)
+        self.design_seg = ui_kit.segmented(bar)
+        self.layout_radio = ui_kit.seg_button(self.design_seg, "Layout", "Layout", self.view, self.on_view_change)
+        self.design_radio = ui_kit.seg_button(self.design_seg, "Design", "Design", self.view, self.on_view_change)
         Tooltip(self.layout_radio, "Fast view for arranging: photos are shown as plain pictures,\n"
                                    "without the engraving processing.")
         Tooltip(self.design_radio, "The real engraving of the whole design (slower to update).")
-        self.view_radios = []
-        for v in VIEWS:
-            rb = ttk.Radiobutton(bar, text=v, value=v, variable=self.view, command=self.on_view_change)
-            rb.pack(side="left", padx=(0, 4))
-            self.view_radios.append(rb)
+        self.view_seg = ui_kit.segmented(bar)
+        self.view_seg.pack(side="left")
+        self.view_radios = [ui_kit.seg_button(self.view_seg, v, v, self.view, self.on_view_change) for v in VIEWS]
         self.compare_cb = ttk.Checkbutton(bar, text="Compare (C)", variable=self.compare, command=self.redraw)
         self.compare_cb.pack(side="right")
         Tooltip(self.compare_cb, "Before/after split on the Adjusted, Engraving and Material look views:\n"

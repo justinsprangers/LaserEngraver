@@ -295,6 +295,16 @@ def style_theme(root, px):
         st.map(w, bordercolor=[("focus", accent)], fieldbackground=[("readonly", field), ("disabled", bg)],
                foreground=[("disabled", muted), ("readonly", text)], background=[("active", hover)],
                selectbackground=[("readonly", field)], selectforeground=[("readonly", text)])
+    # Segmented buttons (like the web version): radio buttons joined in one bordered strip,
+    # the selected one filled. See segmented(). Fix-tool variants fill with the stroke color.
+    st.configure("Seg.TFrame", background=border)
+    st.configure("Seg.Toolbutton", background=field, foreground=text, bordercolor=field, lightcolor=field,
+                 darkcolor=field, relief="flat", borderwidth=0, padding=(px(12), px(5)), anchor="center")
+    for name, fill in (("Seg", accent), ("Keep.Seg", "#16a34a"), ("Remove.Seg", "#dc2626"),
+                       ("PaintKeep.Seg", "#0284c7"), ("PaintRemove.Seg", "#d97706")):
+        st.map(f"{name}.Toolbutton", background=[("selected", fill), ("disabled", bg), ("active", hover)],
+               foreground=[("selected", "white"), ("disabled", muted)],
+               lightcolor=[("selected", fill)], darkcolor=[("selected", fill)], bordercolor=[("selected", fill)])
     st.configure("TNotebook", background=bg, bordercolor=border, tabmargins=(0, px(2), 0, 0))
     st.configure("TNotebook.Tab", background=tab, foreground=muted, bordercolor=border,
                  padding=(px(14), px(6)), lightcolor=tab)
@@ -458,3 +468,17 @@ def section(parent, title, row=None, **grid):
         box.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(0, 10), **grid)
     box.columnconfigure(1, weight=1)
     return box
+
+
+def segmented(parent):
+    """A strip for joined radio buttons (style "Seg.Toolbutton" or a colored variant). The
+    frame's 1 px padding and the 1 px gaps between buttons show as the border lines."""
+    return ttk.Frame(parent, style="Seg.TFrame", padding=1)
+
+
+def seg_button(seg, text, value, variable, command=None, style="Seg.Toolbutton"):
+    """One button in a segmented() strip; pack order = left to right."""
+    rb = ttk.Radiobutton(seg, text=text, value=value, variable=variable, command=command, style=style,
+                         takefocus=False)
+    rb.pack(side="left", padx=(1 if seg.pack_slaves() else 0, 0), fill="y")
+    return rb

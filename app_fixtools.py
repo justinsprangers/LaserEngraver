@@ -10,7 +10,7 @@ from tkinter import messagebox, ttk
 
 import engrave_core as core
 from app_common import STROKE_COLORS
-from ui_kit import Tooltip
+from ui_kit import Tooltip, seg_button, segmented
 
 
 class FixToolsMixin:
@@ -46,11 +46,15 @@ class FixToolsMixin:
                             "For touch-ups after the smart tools.",
         }
         # Row 1: pan + smart tools + undo/clear. Row 2: plain brushes + size + fix count.
+        # Joined buttons like the web version; the selected tool fills with its stroke color.
+        styles = {"pan": "Seg", "keep": "Keep.Seg", "remove": "Remove.Seg",
+                  "paint_keep": "PaintKeep.Seg", "paint_remove": "PaintRemove.Seg"}
         for row, tools in ((row1, (("Pan", "pan"), ("Smart keep", "keep"), ("Smart remove", "remove"))),
                            (row2, (("Brush keep", "paint_keep"), ("Brush erase", "paint_remove")))):
+            seg = segmented(row)
+            seg.pack(side="left")
             for label, val in tools:
-                rb = ttk.Radiobutton(row, text=label, value=val, variable=self.tool, command=self.on_tool)
-                rb.pack(side="left", padx=(0, 6))
+                rb = seg_button(seg, label, val, self.tool, self.on_tool, style=f"{styles[val]}.Toolbutton")
                 if val in tool_tips:
                     Tooltip(rb, tool_tips[val])
         ttk.Button(row1, text="Undo", width=6, command=self.undo_stroke).pack(side="left", padx=(8, 4))

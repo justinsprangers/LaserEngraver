@@ -248,8 +248,7 @@ class DesignController:
         for w in self.bottom_hide:
             w.pack_forget()
         app.save_btn.configure(text="Save engraving")
-        app.layout_radio.pack(side="left", padx=(0, 4), before=app.view_radios[0])
-        app.design_radio.pack(side="left", padx=(0, 12), before=app.view_radios[0])
+        app.design_seg.pack(side="left", padx=(0, 12), before=app.view_seg)
         self._load_globals_into_vars()
         if self.last_snapshot is None:
             self.last_snapshot = copy.deepcopy(self.design)
@@ -283,8 +282,7 @@ class DesignController:
         for w in self.bottom_hide:
             w.pack(side="left", padx=6)
         app.save_btn.configure(text="Save this engraving")
-        app.layout_radio.pack_forget()
-        app.design_radio.pack_forget()
+        app.design_seg.pack_forget()
         if app.view.get() in ("Layout", "Design"):
             app.view.set("Engraving")
         if self.photo_snapshot:
