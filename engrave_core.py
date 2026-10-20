@@ -2,11 +2,11 @@
 engrave_core.py: the processing engine used by engrave_app.py.
 
 Two styles:
-  photo  The pipeline from "--LASER ENGRAVING TOOLS--/Imag-R Mimic Processing/
-         image_processing.py", reorganized so a UI can call it. Same steps, same order,
-         same default numbers. With background removal off, output is pixel-identical.
+  photo  A port of the author's Imag-R-style image_processing.py script (not included in
+         this repo), reorganized so a UI can call it. Same steps, same order, same
+         default numbers. With background removal off, output is pixel-identical.
   comic  Flat tones filled with halftone/hatch patterns plus ink outlines. Built from
-         the adaptive-threshold idea in "Justin Custom Processing".
+         the adaptive-threshold idea in the author's other engraving scripts.
 
 Differences from the original photo script:
   - Settings are passed in (a Settings object) instead of read from globals.

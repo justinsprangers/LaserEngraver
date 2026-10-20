@@ -2,9 +2,9 @@
 
 A desktop app that turns photos into 1-bit engraving files. Two styles:
 
-- **Photo**: the Imag-R-style pipeline from
-  `--LASER ENGRAVING TOOLS--/Imag-R Mimic Processing/image_processing.py`. Output matches that
-  script pixel for pixel (with background removal off), just faster and with a live preview.
+- **Photo**: an Imag-R-style pipeline, ported from my original processing script. Output
+  matches that script pixel for pixel (with background removal off), just faster and with a
+  live preview.
 - **Comic**: flat tones filled with halftone dots and crosshatching, plus bold ink outlines.
   Less realistic, more graphic, and much faster to burn.
 
@@ -353,4 +353,7 @@ Run `python engrave_core.py -h` for all options.
 | `materials.json` | Material profiles. |
 | `settings.json` | Remembers your last settings and file list (created automatically, not in git). |
 | `output/` | Default save folder (not in git). |
-| `--LASER ENGRAVING TOOLS--/` | The original scripts, kept unchanged for reference. |
+
+## License
+
+MIT. See [LICENSE](LICENSE).

@@ -1,0 +1,16 @@
+# Generated engravings and per-machine app state (last files, window size, fixes, presets)
+/output/
+/settings.json
+/fixes.json
+/presets.json
+/cutout_cache/
+# Design projects and their unpacked images (personal photos)
+/project_assets/
+*.lep
+# Build outputs (rebuild with build.bat)
+/build/
+/dist/
+/installer/
+# Python
+__pycache__/
+*.pyc
