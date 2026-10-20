@@ -258,8 +258,9 @@ class App(PanelsMixin, PreviewMixin, FixToolsMixin, KeysMixin):
         self.listbox.bind("<Delete>", lambda e: self.remove_selected())
 
         # --- settings tabs: the tab headers stay pinned; each page scrolls on its own
-        nb = ttk.Notebook(left)
-        nb.pack(fill="both", expand=True, pady=(10, 0))
+        nb = ui_kit.StripNotebook(left)            # tab headers = a segmented button strip
+        nb.strip.pack(anchor="w", pady=(10, 6))
+        nb.pack(fill="both", expand=True)
         self.left = left
         basic, fine, comic = ScrollTab(nb), ScrollTab(nb), ScrollTab(nb)
         nb.add(basic, text="Basic")
@@ -323,7 +324,7 @@ class App(PanelsMixin, PreviewMixin, FixToolsMixin, KeysMixin):
         self.info.pack(side="left", fill="x", expand=True)
         self.info.bind("<Configure>", lambda e: self.info.configure(wraplength=max(200, e.width)))
 
-        self.dc.build(top, nb, nb, bottom_hide=[self.batch_btn, self.comparison_cb])
+        self.dc.build(top, nb.strip, nb, bottom_hide=[self.batch_btn, self.comparison_cb])
         self._bind_shortcuts()
 
     # ------------------------------------------------------------ settings

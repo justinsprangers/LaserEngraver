@@ -310,6 +310,9 @@ def style_theme(root, px):
                  padding=(px(14), px(6)), lightcolor=tab)
     st.map("TNotebook.Tab", background=[("selected", bg)], foreground=[("selected", text)],
            lightcolor=[("selected", bg)], expand=[("selected", (0, px(2), 0, 0))])
+    # StripNotebook: native tab row hidden; its segmented() strip is the tab headers.
+    st.configure("Strip.TNotebook", background=bg, bordercolor=border, tabmargins=(0, 0, 0, 0))
+    st.layout("Strip.TNotebook.Tab", [])
     for o in ("Vertical", "Horizontal"):
         st.configure(f"{o}.TScrollbar", arrowsize=px(14), background=tab, bordercolor=bg, troughcolor=bg,
                      gripcount=0, arrowcolor=muted, lightcolor=tab, darkcolor=tab)
@@ -474,6 +477,50 @@ def segmented(parent):
     """A strip for joined radio buttons (style "Seg.Toolbutton" or a colored variant). The
     frame's 1 px padding and the 1 px gaps between buttons show as the border lines."""
     return ttk.Frame(parent, style="Seg.TFrame", padding=1)
+
+
+class StripNotebook(ttk.Notebook):
+    """A Notebook whose tab headers are a segmented() strip (`.strip`, which the caller packs
+    above the notebook) instead of the native tabs. The strip follows add / insert / forget /
+    hide and selection changes, so code can use the normal Notebook methods."""
+
+    def __init__(self, master, **kw):
+        super().__init__(master, style="Strip.TNotebook", **kw)
+        self.strip = segmented(master)
+        self._var = tk.StringVar(master=self)
+        self._shown = None
+        self.bind("<<NotebookTabChanged>>", lambda e: self.refresh_strip(), add="+")
+
+    def add(self, child, **kw):
+        super().add(child, **kw)
+        self.refresh_strip()
+
+    def insert(self, pos, child, **kw):
+        super().insert(pos, child, **kw)
+        self.refresh_strip()
+
+    def forget(self, tab_id):
+        super().forget(tab_id)
+        self.refresh_strip()
+
+    def hide(self, tab_id):
+        super().hide(tab_id)
+        self.refresh_strip()
+
+    def refresh_strip(self):
+        shown = [(str(t), self.tab(t, "text")) for t in self.tabs() if self.tab(t, "state") != "hidden"]
+        if shown != self._shown:
+            for w in self.strip.winfo_children():
+                w.destroy()
+            for tid, text in shown:
+                seg_button(self.strip, text, tid, self._var, lambda t=tid: self.select(t))
+            self._shown = shown
+            if S is not None:
+                S.refresh(self.strip)
+        try:
+            self._var.set(str(self.select()))
+        except tk.TclError:
+            pass
 
 
 def seg_button(seg, text, value, variable, command=None, style="Seg.Toolbutton"):
