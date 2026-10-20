@@ -6,7 +6,10 @@
     "gamma": 1.7,
     "invert": false,
     "mirror": false,
-    "look": ["#d9b38c", "#5a3a22"]
+    "look": [
+      "#d9b38c",
+      "#5a3a22"
+    ]
   },
   "acrylic": {
     "contrast": 1.4,
@@ -14,7 +17,10 @@
     "gamma": 0.85,
     "invert": true,
     "mirror": true,
-    "look": ["#1e2228", "#e8eef2"]
+    "look": [
+      "#1e2228",
+      "#e8eef2"
+    ]
   },
   "leather": {
     "contrast": 1.3,
@@ -22,7 +28,10 @@
     "gamma": 1.1,
     "invert": false,
     "mirror": false,
-    "look": ["#a0703f", "#3b2412"]
+    "look": [
+      "#a0703f",
+      "#3b2412"
+    ]
   },
   "slate": {
     "contrast": 1.5,
@@ -30,7 +39,10 @@
     "gamma": 0.9,
     "invert": true,
     "mirror": false,
-    "look": ["#3a3d42", "#b9bcbf"]
+    "look": [
+      "#3a3d42",
+      "#b9bcbf"
+    ]
   },
   "cardboard": {
     "contrast": 1.1,
@@ -38,6 +50,9 @@
     "gamma": 1.3,
     "invert": false,
     "mirror": false,
-    "look": ["#c8a77a", "#4b3520"]
+    "look": [
+      "#c8a77a",
+      "#4b3520"
+    ]
   }
 }
