@@ -1,236 +1,241 @@
-// tour.js: the guided tour (Help → Take the tour, offered on a first visit) and the sample photo.
-// Each step highlights one part of the page and explains it, in the order you'd use the app.
-// Uses app.js globals: openFiles, files, selectFile, LS.
+// tour.js: the tutorial, built like ToolTrace's. Each step dims the page, spotlights one control
+// and explains it in a small card (End / Back / Next). The page stays usable underneath, so people
+// can try things as they go. It can load a sample photo, and starts by itself on the first visit;
+// the Tutorial button replays it. Uses app.js globals: files, openFiles, selectFile, closeFile,
+// setView, view, S, LS, el, fail.
 "use strict";
 
-const SAMPLE = { url: "samples/astronaut.jpg", name: "sample-astronaut.jpg" };
+(function () {
+  const q = (sel) => document.querySelector(sel);
+  const SAMPLE = { url: "samples/astronaut.jpg", name: "sample-astronaut.jpg" };
+  const sec = (slug) => `#pane-basic [data-sec="${slug}"]`;
+  const basicTab = () => q('.tab[data-tab="basic"]').click();
 
-async function loadSample() {
-  const have = files.find((f) => f.name === SAMPLE.name);
-  if (have) { selectFile(have); return; }
-  const r = await fetch(SAMPLE.url);
-  if (!r.ok) throw new Error("couldn't load the sample photo");
-  await openFiles([new File([await r.blob()], SAMPLE.name, { type: "image/jpeg" })]);
-}
+  // ---------- Steps ----------
+  // target: selector (or function returning one); parent: use target.closest(parent);
+  // before(): set the page up for the step; noNext: the step's own buttons move on.
+  const STEPS = [
+    { title: "Welcome to Laser Engraver", noNext: true, html:
+      "<p>Turn a photo into a file for your laser, in four steps:</p>" +
+      "<ol><li><b>Open</b> a photo</li><li><b>Pick</b> the style, material and size</li>" +
+      "<li><b>Check</b> the preview (and fix the background if you removed it)</li>" +
+      "<li><b>Download</b> the engraving for your laser software</li></ol>" +
+      '<div class="tour-acts"><button class="btn primary" data-act="sample">Try it with a sample photo</button>' +
+      '<button class="btn" data-act="next">Use my own photo</button></div>' },
+    { target: "#openBtn", title: "Open your photos", html:
+      "<ul><li>Click <b>Open photos</b>, or drop photos anywhere on the page (<kbd>Ctrl</kbd>+<kbd>V</kbd> pastes one).</li>" +
+      "<li>Open several at once; the settings apply to all of them.</li>" +
+      "<li>Nothing is uploaded: your photos stay on this computer.</li></ul>" },
+    { target: ".files", title: "Your photos", html:
+      "<ul><li>Click a photo to work on it; <b>×</b> closes it.</li>" +
+      "<li>Crop, rotation and background fixes belong to each photo.</li></ul>" },
+    { target: sec("style-material"), before: basicTab, title: "Style and material", html:
+      "<ul><li><b>Photo</b>: realistic shading in fine dots. <b>Comic</b>: flat tones, halftone dots and bold ink lines (burns faster).</li>" +
+      "<li>The <b>material</b> sets contrast, brightness, gamma, invert and mirror for that surface.</li>" +
+      "<li>Built-in materials are locked; <b>Save as…</b> keeps your own version.</li></ul>" },
+    { target: sec("size-resolution"), before: basicTab, title: "Size and resolution", html:
+      "<ul><li>Type the <b>width</b> (or pick <b>Height</b>) in inches; the other side follows the photo.</li>" +
+      "<li><b>DPI</b> is the line spacing: 254 DPI = 0.1 mm. Use the same value in your laser software.</li>" +
+      "<li><b>Dither</b>: stucki for the most detail, floyd-steinberg for portraits, bayer for wood grain.</li></ul>" },
+    { target: "#stage", before: () => setView("engraving"), title: "The engraving preview", html:
+      "<ul><li>Black is where the laser fires.</li>" +
+      "<li>Scroll to zoom, drag to pan, double-click to fit.</li>" +
+      "<li><b>1:1</b> (top right) shows one laser dot per screen pixel.</li></ul>" },
+    { target: "#views", title: "Views", html:
+      "<ul><li><b>Original</b>: your photo. <b>Adjusted</b>: after the tone settings.</li>" +
+      "<li><b>Engraving</b>: the real dots. <b>Material look</b>: in the material's colors.</li>" +
+      "<li>Keys <kbd>1</kbd> to <kbd>5</kbd> switch views.</li></ul>" },
+    { target: "#compare", parent: "label", title: "Before and after", html:
+      "<ul><li>Tick <b>Compare</b> to see the original left of a divider that follows the mouse.</li>" +
+      "<li>Works on the Adjusted, Engraving and Material look views.</li></ul>" },
+    { target: sec("tone"), before: basicTab, title: "Tone", html:
+      "<ul><li><b>Contrast</b> pushes tones apart; higher <b>brightness</b> burns less; <b>gamma</b> above 1 lightens midtones.</li>" +
+      "<li><b>Invert</b>: for materials where the laser makes light marks (slate, black acrylic).</li>" +
+      "<li><b>Mirror</b>: for engraving the back of clear acrylic.</li></ul>" },
+    { target: sec("background"), before: basicTab, title: "Remove the background", html:
+      "<ul><li>Tick <b>Remove background (AI)</b> to cut out the subject, so the laser skips the background.</li>" +
+      "<li>The first time, the AI model downloads once (176 MB); then it takes a few seconds per photo.</li></ul>" },
+    { target: () => (q("#fixbar").hidden ? sec("background") : "#fixbar"),
+      before: () => { basicTab(); if (S.remove_bg && files.length) setView("cutout"); },
+      title: "Fix the cut-out", html: () =>
+      (q("#fixbar").hidden ? "<p>With Remove background on, these tools appear above the preview:</p>" : "") +
+      "<ul><li>The <b>Cut-out</b> view tints removed areas red.</li>" +
+      "<li><b>Smart keep</b> (<kbd>K</kbd>): paint on missing subject. <b>Smart remove</b> (<kbd>R</kbd>): paint on leftover background. Keep only adds; remove only takes away.</li>" +
+      "<li><b>Brush keep / erase</b> (<kbd>B</kbd> / <kbd>E</kbd>): exactly what you paint, for touch-ups.</li>" +
+      "<li><kbd>[</kbd> <kbd>]</kbd> brush size, <kbd>Ctrl</kbd>+<kbd>Z</kbd> undo.</li></ul>" },
+    { target: "#cropSection", before: () => { basicTab(); if (view === "cutout") setView("engraving"); },
+      title: "Crop and rotate", html:
+      "<ul><li>Turn 90° at a time, straighten a tilted photo, or trim each edge by a percentage.</li>" +
+      "<li>Only affects the selected photo.</li></ul>" },
+    { target: ".tabs", title: "Tuning tabs and presets", html:
+      "<ul><li><b>Photo tuning</b>: shadow recovery, local contrast, sharpening.</li>" +
+      "<li><b>Comic tuning</b>: tone bands, dot spacing, ink lines.</li>" +
+      "<li>Save a look you like as a <b>preset</b> (kept in this browser).</li></ul>" },
+    { target: "#downloadBtn", title: "Download", html:
+      "<ul><li><b>Download PNG</b> saves the selected photo's engraving; <b>Download all</b> does every photo.</li>" +
+      "<li>The file name includes the material, size and DPI.</li>" +
+      "<li>For a red cut line around the subject, tick <b>Also download cut outline</b> under Extras.</li></ul>" },
+    { target: "footer.status", title: "Job time", html:
+      "<ul><li>The estimate is the rough engraving time.</li>" +
+      "<li>Type your laser's engraving speed (mm/s) so it fits your machine.</li></ul>" },
+    { title: "You're set", html:
+      "<ul><li>In your laser software, engrave at the same DPI (254 = 0.1 mm line interval) and <b>turn its own dithering off</b>, or the dots get blotchy.</li>" +
+      "<li>Burn a small test on scrap first.</li>" +
+      "<li><b>Tutorial</b> (top right) replays this tour.</li></ul>" +
+      '<p class="tour-note" id="tourSampleNote" hidden>The sample photo is closed when the tour ends.</p>' },
+  ];
 
-const fixbarShown = () => !document.querySelector("#fixbar").hidden;
-const FIX_TOOLS = "<b>Smart keep</b> (green): paint on part of the subject that got removed; it brings " +
-  "back that whole region. <b>Smart remove</b> (red): paint on leftover background; it removes that " +
-  "region. Keep only ever adds and remove only ever takes away. <b>Brush keep / erase</b> " +
-  "(blue / orange) change exactly what you paint, for touch-ups. <b>Undo</b> or Ctrl+Z takes back " +
-  "the last fix; <b>[</b> and <b>]</b> change the brush size.";
+  // ---------- Engine ----------
 
-const STEPS = [
-  { welcome: true, title: "Welcome to Laser Engraver",
-    text: "This tour shows where everything is and walks through making an engraving, start to " +
-      "finish. It takes about a minute. Load the sample photo to follow along, or use your own." },
-  { target: "#openBtn", title: "1. Open your photos",
-    text: "Click <b>Open photos</b>, or drag photos anywhere onto the page (Ctrl+V pastes one). " +
-      "Open as many as you like. Your photos stay on this computer: <b>nothing is uploaded</b>." },
-  { target: ".files", title: "Your photos",
-    text: "Every open photo is listed here. Click one to work on it; <b>×</b> closes it. Crop, " +
-      "rotation and background fixes belong to each photo; all other settings apply to every photo." },
-  { target: '#pane-basic [data-sec="style-material"]', tab: "basic", title: "2. Pick a style and material",
-    text: "<b>Photo</b> is realistic shading made of fine dots. <b>Comic</b> is flat tones, halftone " +
-      "dots and bold ink lines, and burns faster. The <b>material</b> sets contrast, brightness, gamma, " +
-      "invert and mirror for that surface. Built-in materials can't be changed: adjust the sliders " +
-      "and use <b>Save as…</b> to keep your own version." },
-  { target: '#pane-basic [data-sec="size-resolution"]', tab: "basic", title: "3. Set the size",
-    text: "Type the <b>width</b> in inches (or pick <b>Height</b>); the other side follows the photo. " +
-      "<b>DPI</b> is how close the laser lines are: 254 DPI = 0.10 mm line interval. Use the same " +
-      "value in your laser software. <b>Dither</b> turns gray into dots: stucki for the most detail, " +
-      "floyd-steinberg for portraits, bayer for wood grain." },
-  { target: '#pane-basic [data-sec="background"]', tab: "basic", title: "4. Remove the background (optional)",
-    text: "Cuts the subject out so the laser skips the background, and gives the cut outline a real " +
-      "silhouette. The first time, the AI model (176 MB) downloads once; after that it takes a few " +
-      "seconds per photo." },
-  { target: () => (fixbarShown() ? "#fixbar" : '#pane-basic [data-sec="background"]'), tab: "basic",
-    title: "Fix the cut-out",
-    text: () => (fixbarShown()
-      ? "The AI isn't perfect, so paint on its mistakes in the <b>Cut-out</b> view (removed areas " +
-        "are tinted red). " + FIX_TOOLS
-      : "When Remove background is on, a <b>Fix the cut-out</b> toolbar appears above the preview, " +
-        "and the <b>Cut-out</b> view shows removed areas tinted red. Paint on the AI's mistakes: " + FIX_TOOLS) },
-  { target: "#views", title: "5. Check the result",
-    text: "<b>Original</b> is your photo, <b>Adjusted</b> is after the tone settings, <b>Engraving</b> " +
-      "is the real laser dots (black = the laser fires; zoom in to see them), and <b>Material look</b> " +
-      "previews it in the material's colors. Keys 1 to 5 switch views." },
-  { target: ".viewbar .zoom", title: "Zoom and compare",
-    text: "Scroll the mouse wheel to zoom and drag to pan. <b>Fit</b> shows the whole image; " +
-      "<b>1:1</b> shows one laser dot per screen pixel. Tick <b>Compare</b> to see the original left " +
-      "of a divider that follows your mouse." },
-  { target: '#pane-basic [data-sec="tone"]', tab: "basic", title: "6. Fine-tune the tone",
-    text: "<b>Contrast</b> pushes tones apart, <b>brightness</b> higher means less burning, and " +
-      "<b>gamma</b> above 1 lightens the midtones. <b>Invert</b> is for materials where the laser makes " +
-      "light marks (slate, black acrylic). <b>Mirror</b> is for engraving the back of clear acrylic." },
-  { target: "#cropSection", tab: "basic", title: "Crop and rotate",
-    text: "Turn the photo 90° at a time, straighten a tilted one, or trim each edge by a percentage. " +
-      "These belong to the selected photo only." },
-  { target: ".tabs", title: "More tuning and presets",
-    text: "<b>Photo tuning</b> has shadow recovery, local contrast and sharpening; <b>Comic tuning</b> " +
-      "has tone bands, dot spacing and ink lines. Found a look you like? Save it as a <b>preset</b>. " +
-      "Presets and your own materials are saved in this browser only." },
-  { target: "#downloadBtn", title: "7. Download the engraving",
-    text: "<b>Download PNG</b> saves the selected photo's engraving; <b>Download all</b> does every " +
-      "photo. The file name includes the material, size and DPI. For a red cut line around the " +
-      "subject, tick <b>Also download cut outline</b> under Extras on the Basic tab." },
-  { target: "footer.status", title: "How long will it take?",
-    text: "The status bar shows a rough engraving time. Type your laser's engraving speed (mm/s) " +
-      "so the estimate fits your machine." },
-  { center: true, title: "8. In your laser software",
-    text: "Import the PNG at the same resolution it was saved at (254 DPI = 100 lines/cm = 0.1 mm " +
-      "line interval) and <b>turn off the software's own dithering</b> (use black & white or " +
-      "threshold mode). If the software resizes or re-dithers the dots, you get blotchy, boxy " +
-      "patches. Burn a small test on scrap first. You can reopen this tour from <b>Help</b>." },
-];
+  let dim, hi, card, idx = 0, open = false, usedSample = false, saved = null;
+  const val = (v) => (typeof v === "function" ? v() : v);
 
-let tour = null;          // {i, root, hole, card}
+  function build() {
+    dim = el("div", { id: "tourDim" });
+    hi = el("div", { id: "tourHi" });
+    card = el("div", { id: "tourCard", role: "dialog" });
+    card.innerHTML = '<div class="tour-step"></div><h3></h3><div class="tour-body"></div>' +
+      '<div class="tour-nav"><button class="btn sm" data-act="end">End</button><span></span>' +
+      '<button class="btn sm" data-act="back">Back</button><button class="btn sm primary" data-act="next">Next</button></div>';
+    document.body.append(dim, hi, card);
+    card.addEventListener("click", (e) => {
+      const act = e.target.dataset && e.target.dataset.act;
+      if (act === "next") go(idx + 1);
+      else if (act === "back") go(idx - 1);
+      else if (act === "end") end();
+      else if (act === "sample") loadSample(e.target);
+    });
+    window.addEventListener("resize", () => open && place());
+    window.addEventListener("scroll", () => open && place(false), true);
+  }
 
-function startTour() {
-  if (tour) return;
-  const help = document.querySelector("#help");
-  if (help.open) help.close();
-  hidePrompt();
-  LS.set("tourSeen", true);
-  const root = el("div", { className: "tour" });
-  const dim = el("div", { className: "tour-dim" });           // dark layer with a hole cut out
-  const hole = el("div", { className: "tour-hole" });         // the accent ring around the hole
-  const card = el("div", { className: "tour-card", role: "dialog" });
-  card.setAttribute("aria-live", "polite");
-  root.append(dim, hole, card);
-  document.body.append(root);
-  tour = { i: 0, root, dim, hole, card };
-  showStep(0);
-  requestAnimationFrame(track);
-}
-
-function endTour() {
-  if (!tour) return;
-  tour.root.remove();
-  tour = null;
-}
-
-const val = (v) => (typeof v === "function" ? v() : v);
-
-function showStep(i) {
-  tour.i = i;
-  const step = STEPS[i];
-  if (step.tab) document.querySelector(`.tab[data-tab="${step.tab}"]`)?.click();
-  const target = step.target ? document.querySelector(val(step.target)) : null;
-  if (target) target.scrollIntoView({ block: "nearest", inline: "nearest" });
-  tour.target = target;
-
-  const card = tour.card;
-  const btn = (text, cls, fn) => {
-    const b = el("button", { className: `btn ${cls}`, textContent: text, type: "button" });
-    b.addEventListener("click", fn);
-    return b;
-  };
-  const head = el("div", { className: "tour-head" },
-    el("span", { className: "tour-count", textContent: step.welcome ? "Guided tour" : `${i} of ${STEPS.length - 1}` }),
-    btn("✕", "ghost sm tour-x", endTour));
-  head.lastChild.title = "Close the tour (Esc)";
-  const body = el("div", { className: "tour-text" });
-  body.innerHTML = val(step.text);
-  const actions = el("div", { className: "tour-actions" });
-  if (step.welcome) {
-    if (!files.length) {
-      actions.append(btn("Use the sample photo", "primary", async (e) => {
-        e.target.disabled = true;
-        e.target.textContent = "Loading…";
-        try { await loadSample(); } catch { /* the tour works without it */ }
-        if (tour) showStep(1);
-      }));
+  async function loadSample(btn) {
+    btn.disabled = true;
+    btn.textContent = "Loading the sample…";
+    try {
+      const have = files.find((f) => f.name === SAMPLE.name);
+      if (have) selectFile(have);
+      else {
+        const r = await fetch(SAMPLE.url);
+        if (!r.ok) throw new Error(`status ${r.status}`);
+        await openFiles([new File([await r.blob()], SAMPLE.name, { type: "image/jpeg" })]);
+        usedSample = true;
+      }
+    } catch (err) {
+      fail(`Couldn't load the sample photo: ${err.message}`);
     }
-    actions.append(btn(files.length ? "Start the tour" : "Use my own photos", files.length ? "primary" : "", () => showStep(1)),
-      btn("Not now", "ghost", endTour));
-  } else {
-    actions.append(btn("Back", "ghost", () => showStep(i - 1)));
-    const last = i === STEPS.length - 1;
-    actions.append(btn(last ? "Finish" : "Next", "primary", () => (last ? endTour() : showStep(i + 1))));
+    if (open) go(idx + 1);
   }
-  card.replaceChildren(head, el("h3", { textContent: step.title }), body, actions);
-  card.classList.toggle("centered", !target);
-  place();
-  actions.querySelector(".primary")?.focus({ preventScroll: true });
-}
 
-function place() {
-  if (!tour) return;
-  const { dim, hole, card, target } = tour;
-  const vw = window.innerWidth, vh = window.innerHeight, pad = 6, gap = 14;
-  if (!target || !target.getClientRects().length) {
-    dim.style.clipPath = `path("M0 0H${vw}V${vh}H0Z")`;          // whole page dimmed
-    hole.hidden = true;
-    Object.assign(card.style, { left: `${Math.max(12, (vw - card.offsetWidth) / 2)}px`,
-      top: `${Math.max(12, (vh - card.offsetHeight) / 2)}px` });
-    return;
+  function targetEl(st) {
+    if (!st.target) return null;
+    let t = q(val(st.target));
+    if (t && st.parent) t = t.closest(st.parent) || t;
+    if (!t || t.hidden || !t.getClientRects().length) return null;
+    return t;
   }
-  const r = target.getBoundingClientRect();
-  const box = { left: r.left - pad, top: r.top - pad, width: r.width + 2 * pad, height: r.height + 2 * pad };
-  hole.hidden = false;
-  Object.assign(hole.style, { left: `${box.left}px`, top: `${box.top}px`, width: `${box.width}px`, height: `${box.height}px` });
-  dim.style.clipPath = `path(evenodd, "M0 0H${vw}V${vh}H0Z M${box.left} ${box.top}` +
-    `h${box.width}v${box.height}h${-box.width}Z")`;
-  const cw = card.offsetWidth, ch = card.offsetHeight;
-  if (vw < 600) {                                   // phones: card pinned to the edge away from the target
-    const below = box.top + box.height / 2 < vh / 2;
-    Object.assign(card.style, { left: "12px", top: below ? `${vh - ch - 12}px` : "12px" });
-    return;
+
+  function go(i) {
+    if (i < 0) return;
+    if (i >= STEPS.length) { end(); return; }
+    idx = i;
+    const st = STEPS[i];
+    try { if (st.before) st.before(); } catch (e) { console.error(e); }
+    card.querySelector(".tour-step").textContent = `Step ${i + 1} of ${STEPS.length}`;
+    card.querySelector("h3").textContent = st.title;
+    card.querySelector(".tour-body").innerHTML = val(st.html);
+    const nav = card.querySelector(".tour-nav");
+    nav.querySelector('[data-act="back"]').disabled = i === 0;
+    nav.querySelector('[data-act="next"]').hidden = !!st.noNext;
+    nav.querySelector('[data-act="next"]').textContent = i === STEPS.length - 1 ? "Finish" : "Next";
+    const note = q("#tourSampleNote");
+    if (note) note.hidden = !usedSample;
+    place();
+    setTimeout(() => open && place(), 350);      // layout can shift a moment later (renders, tabs)
+    setTimeout(() => open && place(), 900);
   }
-  const fits = {
-    right: box.left + box.width + gap + cw <= vw - 8,
-    below: box.top + box.height + gap + ch <= vh - 8,
-    left: box.left - gap - cw >= 8,
-    above: box.top - gap - ch >= 8,
-  };
-  let x, y;
-  if (fits.right) { x = box.left + box.width + gap; y = box.top; }
-  else if (fits.below) { x = box.left; y = box.top + box.height + gap; }
-  else if (fits.left) { x = box.left - gap - cw; y = box.top; }
-  else if (fits.above) { x = box.left; y = box.top - gap - ch; }
-  else { x = (vw - cw) / 2; y = vh - ch - 12; }
-  Object.assign(card.style, { left: `${Math.min(Math.max(8, x), vw - cw - 8)}px`,
-    top: `${Math.min(Math.max(8, y), vh - ch - 8)}px` });
-}
 
-function track() {                 // follow the target if the page scrolls, resizes or re-lays out
-  if (!tour) return;
-  place();
-  requestAnimationFrame(track);
-}
+  // Spotlight the step's control (scrolled into view) and put the card beside it, or centre the
+  // card when there's nothing to point at.
+  function place(scroll = true) {
+    const st = STEPS[idx], t = targetEl(st);
+    if (t && scroll) t.scrollIntoView({ block: "nearest", inline: "nearest" });
+    const vw = window.innerWidth, vh = window.innerHeight, cw = card.offsetWidth, ch = card.offsetHeight, pad = 6;
+    if (!t) {                                   // nothing to point at: dim everything, card centred
+      dim.style.clipPath = "none";
+      hi.style.display = "none";
+      card.style.left = `${Math.max(12, (vw - cw) / 2)}px`;
+      card.style.top = `${Math.max(12, (vh - ch) / 2)}px`;
+      return;
+    }
+    const r = t.getBoundingClientRect();
+    const x0 = r.left - pad, y0 = r.top - pad, x1 = r.right + pad, y1 = r.bottom + pad;
+    hi.style.cssText = `display:block;left:${x0}px;top:${y0}px;width:${x1 - x0}px;height:${y1 - y0}px`;
+    // The dim layer with a hole cut out over the target.
+    dim.style.clipPath = `polygon(evenodd, 0 0, 100% 0, 100% 100%, 0 100%, 0 0, ${x0}px ${y0}px, ` +
+      `${x1}px ${y0}px, ${x1}px ${y1}px, ${x0}px ${y1}px, ${x0}px ${y0}px)`;
+    let x, y;
+    if (r.width > vw * 0.45 && r.height > vh * 0.35) { x = r.left + 16; y = r.top + 16; }  // the preview: card in its corner
+    else if (r.right + 18 + cw < vw) { x = r.right + 18; y = r.top; }
+    else if (r.left - 18 - cw > 0) { x = r.left - 18 - cw; y = r.top; }
+    else if (r.bottom + 14 + ch < vh) { x = r.left; y = r.bottom + 14; }
+    else { x = r.left; y = r.top - 14 - ch; }
+    card.style.left = `${Math.max(12, Math.min(vw - cw - 12, x))}px`;
+    card.style.top = `${Math.max(12, Math.min(vh - ch - 12, y))}px`;
+  }
 
-// Keys: arrows / Enter move through the tour, Esc closes it. The app's own shortcuts are off meanwhile.
-window.addEventListener("keydown", (e) => {
-  if (!tour) return;
-  if (e.key === "Tab" || e.key === "Enter" || e.key === " ") return;     // the card's own buttons
-  const step = STEPS[tour.i];
-  if (e.key === "Escape") endTour();
-  else if (e.key === "ArrowRight" && !step.welcome) {
-    tour.i === STEPS.length - 1 ? endTour() : showStep(tour.i + 1);
-  } else if (e.key === "ArrowLeft" && tour.i > 1) showStep(tour.i - 1);
-  e.stopImmediatePropagation();
-  e.preventDefault();
-}, true);
+  function start() {
+    if (!dim) build();
+    const help = q("#help");
+    if (help.open) help.close();
+    usedSample = false;
+    saved = { view, compare: q("#compare").checked };
+    open = true;
+    document.body.classList.add("touring");
+    dim.hidden = hi.hidden = card.hidden = false;
+    go(0);
+  }
 
-// --- First visit: a small, dismissable offer instead of starting the tour on its own
-let prompt = null;
-function hidePrompt() { prompt?.remove(); prompt = null; }
-window.addEventListener("le-ready", () => {
-  if (LS.get("tourSeen", false)) return;
-  const start = el("button", { className: "btn primary sm", textContent: "Take the tour", type: "button" });
-  const no = el("button", { className: "btn ghost sm", textContent: "No thanks", type: "button" });
-  prompt = el("div", { className: "tour-prompt", role: "status" },
-    el("div", {}, el("b", { textContent: "New here? " }), "Take a 1-minute tour of the tools."),
-    el("div", { className: "tour-actions" }, no, start));
-  start.addEventListener("click", startTour);
-  no.addEventListener("click", () => { LS.set("tourSeen", true); hidePrompt(); });
-  document.body.append(prompt);
-});
+  function end() {
+    if (!open) return;
+    open = false;
+    document.body.classList.remove("touring");
+    dim.hidden = hi.hidden = card.hidden = true;
+    // Put things back: the sample photo goes (photos you opened stay), and the view you had.
+    if (usedSample) {
+      const f = files.find((x) => x.name === SAMPLE.name);
+      if (f) closeFile(f);
+    }
+    if (saved) {
+      q("#compare").checked = saved.compare;
+      setView(saved.view);
+      saved = null;
+    }
+    LS.set("tourDone", true);
+  }
 
-document.querySelector("#helpTourBtn").addEventListener("click", startTour);   // startTour closes Help
-document.querySelector("#emptyTourBtn").addEventListener("click", startTour);
-document.querySelector("#sampleBtn").addEventListener("click", async () => {
-  try { await loadSample(); } catch (err) { fail(`Couldn't load the sample photo: ${err.message}`); }
-});
-window.startTour = startTour;
+  // Esc ends, arrows / Enter step through. Other keys go to the page as usual.
+  document.addEventListener("keydown", (e) => {
+    if (!open) return;
+    if (e.key === "Escape") end();
+    else if (e.key === "ArrowRight" || (e.key === "Enter" && !e.target.closest("button"))) {
+      if (!STEPS[idx].noNext) go(idx + 1);
+    } else if (e.key === "ArrowLeft") go(idx - 1);
+    else return;
+    e.preventDefault();
+    e.stopPropagation();
+  }, true);
+
+  window.tour = { start, end, steps: STEPS };
+  q("#tourBtn").addEventListener("click", start);
+  q("#helpTourBtn").addEventListener("click", start);
+  q("#emptyTourBtn").addEventListener("click", start);
+  q("#sampleBtn").addEventListener("click", async () => {
+    try {
+      const r = await fetch(SAMPLE.url);
+      await openFiles([new File([await r.blob()], SAMPLE.name, { type: "image/jpeg" })]);
+    } catch (err) { fail(`Couldn't load the sample photo: ${err.message}`); }
+  });
+  // First visit: start by itself once the app has loaded.
+  window.addEventListener("le-ready", () => { if (!LS.get("tourDone", false)) setTimeout(start, 300); });
+})();

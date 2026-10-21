@@ -16,7 +16,8 @@ const LS = {
 };
 
 // --- Talking to the worker
-const worker = new Worker("worker.js");
+// Same ?v= as this script's (set in index.html), so an update never runs with a stale worker.
+const worker = new Worker(`worker.js${new URL(document.currentScript.src).search}`);
 let reqSeq = 0;
 const waiting = new Map();
 worker.onmessage = (e) => {

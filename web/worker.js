@@ -44,7 +44,7 @@ self.stuckiJS = function (arr, w, h) {
 };
 
 async function fetchBytes(url) {
-  const r = await fetch(url);
+  const r = await fetch(url, { cache: "no-cache" });      // always check for a newer copy
   if (!r.ok) throw new Error(`Couldn't load ${url} (${r.status})`);
   return new Uint8Array(await r.arrayBuffer());
 }

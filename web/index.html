@@ -6,7 +6,9 @@
 <title>Laser Engraver</title>
 <meta name="description" content="Turn photos into laser engraving files in your browser. Nothing is uploaded.">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="style.css">
+<!-- ?v= makes browsers fetch a fresh copy after an update: bump it (all three, same number)
+     whenever style.css, app.js, tour.js or worker.js change. -->
+<link rel="stylesheet" href="style.css?v=5">
 </head>
 <body>
 <header class="topbar">
@@ -19,6 +21,7 @@
     <button id="downloadAllBtn" class="btn" disabled title="Download engravings for every open photo">Download all</button>
     <span class="sep"></span>
     <button id="themeBtn" class="btn ghost" title="Light / dark theme">◐</button>
+    <button id="tourBtn" class="btn ghost" title="A guided tour of the tools, with a sample photo">Tutorial</button>
     <button id="helpBtn" class="btn ghost">Help</button>
   </div>
 </header>
@@ -82,7 +85,7 @@
         <p>Open a photo to start. Everything runs on this computer: <b>nothing is uploaded</b>.</p>
         <div class="empty-actions">
           <button class="btn" id="sampleBtn" type="button">Try a sample photo</button>
-          <button class="btn ghost" id="emptyTourBtn" type="button">Take the 1-minute tour</button>
+          <button class="btn ghost" id="emptyTourBtn" type="button">Take the tutorial</button>
         </div>
       </div>
     </div>
@@ -111,9 +114,9 @@
 <dialog id="help">
   <form method="dialog" class="dlg">
     <div class="tour-cta">
-      <div><b>New here?</b> The guided tour points out every tool on the page and walks through
-        the whole process, with a sample photo to practice on.</div>
-      <button class="btn primary" id="helpTourBtn" type="button">Take the tour</button>
+      <div><b>New here?</b> The tutorial points out every tool on the page and walks through the
+        whole process, with a sample photo to practice on.</div>
+      <button class="btn primary" id="helpTourBtn" type="button">Start the tutorial</button>
     </div>
     <h2>How to use</h2>
     <ol>
@@ -160,7 +163,7 @@
   </form>
 </dialog>
 
-<script src="app.js"></script>
-<script src="tour.js"></script>
+<script src="app.js?v=5"></script>
+<script src="tour.js?v=5"></script>
 </body>
 </html>

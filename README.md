@@ -43,10 +43,13 @@ How it works:
   Masks match the desktop's to within 1 level out of 255. About 7 s per photo.
 - Fix strokes use the desktop's format and `core.refine_alpha`, so they behave the same. They're
   kept per photo until it's closed or the page is reloaded (photos aren't stored).
-- **Guided tour** (`web/tour.js`): offered once on a first visit, and from **Help → Take the
-  tour** or the start screen. It highlights each part of the page in the order you'd use it and
-  can load a sample photo (`web/samples/`) to practice on. To change the wording or order, edit
-  the `STEPS` list at the top of `tour.js`.
+- **Tutorial** (`web/tour.js`, same style as ToolTrace's): starts by itself on a first visit;
+  the **Tutorial** button (top right), Help, or the start screen replay it. It spotlights each
+  control in the order you'd use it (the page stays usable underneath) and can load a sample
+  photo (`web/samples/`), which it closes again at the end. To change the wording or order, edit
+  the `STEPS` list in `tour.js`.
+- After changing `style.css`, `app.js`, `tour.js` or `worker.js`, bump the `?v=` number in
+  `web/index.html` (all three links), so browsers load the new files instead of a cached copy.
 - Presets, your own materials, settings and theme are saved in the browser (localStorage). The
   built-in materials (`materials.json`) can't be renamed, deleted or overwritten in the web
   version, so a shared computer always has the originals; **Save as…** makes a personal copy.
