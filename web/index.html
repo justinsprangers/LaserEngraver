@@ -12,7 +12,7 @@
 <header class="topbar">
   <div class="brand"><img src="icon.svg" alt="" width="22" height="22"> Laser Engraver <span class="badge">web</span></div>
   <div class="actions">
-    <label class="btn primary" title="Open photos (or drop them anywhere on the page)">
+    <label class="btn primary" id="openBtn" title="Open photos (or drop them anywhere on the page)">
       Open photos<input id="fileInput" type="file" accept="image/*" multiple hidden>
     </label>
     <button id="downloadBtn" class="btn" disabled title="Download the engraving PNG for the selected photo">Download PNG</button>
@@ -80,6 +80,10 @@
       <div id="empty" class="empty">
         <h2>Photos to laser engravings, in your browser</h2>
         <p>Open a photo to start. Everything runs on this computer: <b>nothing is uploaded</b>.</p>
+        <div class="empty-actions">
+          <button class="btn" id="sampleBtn" type="button">Try a sample photo</button>
+          <button class="btn ghost" id="emptyTourBtn" type="button">Take the 1-minute tour</button>
+        </div>
       </div>
     </div>
     <div class="infobar"><span id="info"></span></div>
@@ -106,6 +110,11 @@
 
 <dialog id="help">
   <form method="dialog" class="dlg">
+    <div class="tour-cta">
+      <div><b>New here?</b> The guided tour points out every tool on the page and walks through
+        the whole process, with a sample photo to practice on.</div>
+      <button class="btn primary" id="helpTourBtn" type="button">Take the tour</button>
+    </div>
     <h2>How to use</h2>
     <ol>
       <li><b>Open photos</b> (or drop them on the page). Click one in the list to work on it.</li>
@@ -152,5 +161,6 @@
 </dialog>
 
 <script src="app.js"></script>
+<script src="tour.js"></script>
 </body>
 </html>

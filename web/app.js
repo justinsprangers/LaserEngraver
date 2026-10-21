@@ -97,6 +97,7 @@ function fail(msg) { doneProgress(); setStatus(msg, "error"); }
 
 function section(parent, title) {
   const s = el("div", { className: "section" }, el("h4", { textContent: title }));
+  s.dataset.sec = title.toLowerCase().replace(/[^a-z]+/g, "-").replace(/^-|-$/g, "");  // for the tour
   parent.append(s);
   return s;
 }
@@ -1024,6 +1025,7 @@ window.addEventListener("keyup", (e) => {
     $("#loading").classList.add("hidden");
     renderFileList();
     setStatus("Ready. Open photos to start.");
+    window.dispatchEvent(new Event("le-ready"));          // tour.js offers the tour on a first visit
   } catch (e) {
     $("#loadText").textContent = `Couldn't start: ${e.message}. Check your internet connection and reload the page.`;
     $("#loadText").className = "error";

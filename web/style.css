@@ -188,6 +188,31 @@ dialog::backdrop { background: rgba(0,0,0,.4); }
 .dlg li { margin: 4px 0; }
 .dlg-actions { display: flex; justify-content: flex-end; margin-top: 16px; }
 
+/* --- Empty state and Help */
+.empty-actions { display: flex; gap: 8px; margin-top: 8px; pointer-events: auto; flex-wrap: wrap; justify-content: center; }
+.tour-cta { display: flex; align-items: center; gap: 16px; padding: 12px 14px; margin-bottom: 16px;
+  background: var(--hover); border-radius: 10px; }
+.tour-cta .btn { flex: none; }
+
+/* --- Guided tour (tour.js) */
+.tour { position: fixed; inset: 0; z-index: 30; }
+.tour-dim { position: fixed; inset: 0; background: rgba(0, 0, 0, .55); }
+.tour-hole { position: fixed; border-radius: 10px; pointer-events: none; box-shadow: 0 0 0 3px var(--accent); }
+.tour-card { position: fixed; width: min(360px, calc(100vw - 24px)); background: var(--field);
+  color: var(--text); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow);
+  padding: 14px 16px; transition: left .25s, top .25s; }
+.tour-card.centered { width: min(460px, calc(100vw - 24px)); }
+.tour-card h3 { margin: 4px 0 6px; font-size: 16px; }
+.tour-text { font-size: 13.5px; line-height: 1.5; }
+.tour-head { display: flex; justify-content: space-between; align-items: center; }
+.tour-count { font-size: 12px; color: var(--muted); }
+.tour-x { padding: 0 8px; }
+.tour-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+.tour-prompt { position: fixed; right: 16px; bottom: 56px; z-index: 20; width: min(320px, calc(100vw - 32px));
+  background: var(--field); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow);
+  padding: 12px 14px; font-size: 13.5px; }
+@media (prefers-reduced-motion: reduce) { .tour-card { transition: none; } }
+
 /* --- Narrow screens: settings below the preview */
 @media (max-width: 820px) {
   body { display: block; overflow: auto; height: auto; }

@@ -43,6 +43,10 @@ How it works:
   Masks match the desktop's to within 1 level out of 255. About 7 s per photo.
 - Fix strokes use the desktop's format and `core.refine_alpha`, so they behave the same. They're
   kept per photo until it's closed or the page is reloaded (photos aren't stored).
+- **Guided tour** (`web/tour.js`): offered once on a first visit, and from **Help → Take the
+  tour** or the start screen. It highlights each part of the page in the order you'd use it and
+  can load a sample photo (`web/samples/`) to practice on. To change the wording or order, edit
+  the `STEPS` list at the top of `tour.js`.
 - Presets, your own materials, settings and theme are saved in the browser (localStorage). The
   built-in materials (`materials.json`) can't be renamed, deleted or overwritten in the web
   version, so a shared computer always has the originals; **Save as…** makes a personal copy.
