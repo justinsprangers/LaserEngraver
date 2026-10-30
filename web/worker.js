@@ -127,10 +127,54 @@ async function cutout(id) {
 }
 
 function plain(proxy) {
-  // Python dicts arrive as JS objects already (dict_converter); just collect transferables.
+  // Python dicts arrive as JS objects already (dict_converter); just collect transferables
+  // (pixel buffers, also inside lists such as render_layers' layers).
   const transfer = [];
-  for (const v of Object.values(proxy)) if (v instanceof Uint8Array) transfer.push(v.buffer);
+  const walk = (o, depth) => {
+    if (o instanceof Uint8Array) { if (!transfer.includes(o.buffer)) transfer.push(o.buffer); return; }
+    if (depth > 3 || !o || typeof o !== "object") return;
+    for (const v of Array.isArray(o) ? o : Object.values(o)) walk(v, depth + 1);
+  };
+  walk(proxy, 0);
   return [proxy, transfer];
+}
+
+// --- Design mode: loaded the first time it's needed (shapely, fontTools, the design engine,
+// the bundled fonts). Fonts are fetched one file at a time when a design uses them.
+let designReady = null;
+const fontsWritten = new Set();
+
+function designInit() {
+  designReady ??= (async () => {
+    progress("Loading the design tools…", null);
+    await py.loadPackage(["shapely", "fonttools"]);
+    for (const f of ["design.py", "vectors.py", "vecfile.py"])
+      py.FS.writeFile(`/app/${f}`, await fetchBytes(`../${f}`));
+    py.FS.mkdirTree("/fonts");
+    const manifest = new TextDecoder().decode(await fetchBytes("fonts/fonts.json"));
+    const info = JSON.parse(engine.design_init(manifest));
+    await ensureFonts(Object.values(JSON.parse(manifest).families.Arimo));   // the default font
+    return info;
+  })();
+  designReady.catch(() => { designReady = null; });
+  return designReady;
+}
+
+async function ensureFonts(files) {
+  for (const f of files) {
+    if (fontsWritten.has(f)) continue;
+    py.FS.writeFile(`/fonts/${f}`, await fetchBytes(`fonts/${f}`));
+    fontsWritten.add(f);
+  }
+}
+
+// Everything a design render / export needs first: its fonts and background removals.
+async function prepareDesign(design, mode) {
+  await designInit();
+  const json = JSON.stringify(design);
+  await ensureFonts(JSON.parse(engine.font_files(json)));
+  for (const path of JSON.parse(engine.cutouts_needed(json, mode))) await cutout(path);
+  return json;
 }
 
 const handlers = {
@@ -147,6 +191,31 @@ const handlers = {
   export: async ({ id, settings, strokes = [] }) => {
     if (settings.remove_bg) await cutout(id);
     return engine.export(id, JSON.stringify(settings), JSON.stringify(strokes));
+  },
+  // Design mode
+  designInit,
+  newDesign: async ({ material, width_in, height_in, dpi }) =>
+    (await designInit(), JSON.parse(engine.new_design(material, width_in, height_in, dpi))),
+  newLayer: async ({ kind, design, kw = {} }) =>
+    (await designInit(), JSON.parse(engine.new_layer(kind, JSON.stringify(design), JSON.stringify(kw)))),
+  addAsset: async ({ name, bytes }) => (await designInit(), JSON.parse(engine.add_asset(name, bytes))),
+  addFont: async ({ name, bytes }) => (await designInit(), JSON.parse(engine.add_font(name, bytes))),
+  renderLayers: async ({ design, mode = "layout", previewDpi = 0, known = [] }) => {
+    const json = await prepareDesign(design, mode);
+    if (mode !== "layout") progress("Rendering the engraving…", null);
+    return engine.render_layers(json, mode, previewDpi, JSON.stringify(known));
+  },
+  exportDesign: async ({ design, name, factor = 1 }) => {
+    const json = await prepareDesign(design, "export");
+    progress("Saving the engraving…", null);
+    return engine.export_design(json, name, factor);
+  },
+  saveProject: async ({ design }) => (await designInit(), engine.save_project(JSON.stringify(design))),
+  openProject: async ({ bytes }) => {
+    await designInit();
+    const design = JSON.parse(engine.load_project(bytes));
+    await ensureFonts(JSON.parse(engine.font_files(JSON.stringify(design))));
+    return design;
   },
 };
 

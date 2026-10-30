@@ -1,0 +1,70 @@
+{
+ "families": {
+  "Arimo": {
+   "Regular": "Arimo-Regular.ttf",
+   "Bold": "Arimo-Bold.ttf",
+   "Italic": "Arimo-Italic.ttf",
+   "Bold Italic": "Arimo-BoldItalic.ttf"
+  },
+  "Tinos": {
+   "Regular": "Tinos-Regular.ttf",
+   "Bold": "Tinos-Bold.ttf",
+   "Italic": "Tinos-Italic.ttf",
+   "Bold Italic": "Tinos-BoldItalic.ttf"
+  },
+  "Cousine": {
+   "Regular": "Cousine-Regular.ttf",
+   "Bold": "Cousine-Bold.ttf"
+  },
+  "Montserrat": {
+   "Regular": "Montserrat-Regular.ttf",
+   "Bold": "Montserrat-Bold.ttf",
+   "Black": "Montserrat-Black.ttf"
+  },
+  "Oswald": {
+   "Regular": "Oswald-Regular.ttf",
+   "Bold": "Oswald-Bold.ttf"
+  },
+  "Bebas Neue": {
+   "Regular": "BebasNeue-Regular.ttf"
+  },
+  "Playfair Display": {
+   "Regular": "PlayfairDisplay-Regular.ttf",
+   "Bold": "PlayfairDisplay-Bold.ttf",
+   "Italic": "PlayfairDisplay-Italic.ttf"
+  },
+  "Lora": {
+   "Regular": "Lora-Regular.ttf",
+   "Bold": "Lora-Bold.ttf",
+   "Italic": "Lora-Italic.ttf"
+  },
+  "Cinzel": {
+   "Regular": "Cinzel-Regular.ttf",
+   "Bold": "Cinzel-Bold.ttf"
+  },
+  "Dancing Script": {
+   "Regular": "DancingScript-Regular.ttf",
+   "Bold": "DancingScript-Bold.ttf"
+  },
+  "Great Vibes": {
+   "Regular": "GreatVibes-Regular.ttf"
+  },
+  "Pacifico": {
+   "Regular": "Pacifico-Regular.ttf"
+  },
+  "Lobster": {
+   "Regular": "Lobster-Regular.ttf"
+  },
+  "Allerta Stencil": {
+   "Regular": "AllertaStencil-Regular.ttf"
+  }
+ },
+ "aliases": {
+  "Arial": "Arimo",
+  "Helvetica": "Arimo",
+  "Times New Roman": "Tinos",
+  "Times": "Tinos",
+  "Courier New": "Cousine",
+  "Courier": "Cousine"
+ }
+}

@@ -41,13 +41,18 @@ def _pixels(img):
     return to_js(memoryview(a.ravel()))
 
 
+def _register(fid, name, path):
+    gray = core.load_image(path)          # raises if it isn't an image
+    _files[fid] = {"name": name, "path": path, "gray": gray, "rgb": None, "alpha": None,
+                   "steps": {}, "refined": None}
+    return gray
+
+
 def open_file(fid, name, data):
     path = f"/files/{fid}"
     with open(path, "wb") as f:
         f.write(bytes(data.to_py()))
-    gray = core.load_image(path)          # raises if it isn't an image
-    _files[fid] = {"name": name, "path": path, "gray": gray, "rgb": None, "alpha": None,
-                   "steps": {}, "refined": None}
+    gray = _register(fid, name, path)
     return _js({"w": gray.width, "h": gray.height})
 
 
@@ -160,6 +165,243 @@ def export(fid, settings_json, strokes_json="[]"):
         except ValueError as e:
             out["svg_error"] = str(e)
     return _js(out)
+
+
+# --- Design mode -----------------------------------------------------------------------------
+# The desktop's design.py / vectors.py do the work. Differences in the browser:
+#   - fonts are the bundled ones in web/fonts (plus any the user adds), not the installed ones;
+#   - photo layers' background removal comes from the u2net model in worker.js (keyed by the
+#     asset's path), so core.load_source / cached_cutout_alpha are swapped for versions that
+#     use it;
+#   - the page draws each layer itself (render_layers returns one bitmap per layer, placed by
+#     the page), so moving, resizing handles and hit-testing never wait for Python.
+
+_design = {"aliases": set(), "layout": None, "full": None}
+FONT_DIR = "/fonts"
+
+
+def design_init(manifest_json):
+    """Called once the worker has loaded shapely + fontTools. manifest = web/fonts/fonts.json."""
+    import design as D
+    m = json.loads(manifest_json)
+    found = {fam: {style: f"{FONT_DIR}/{name}" for style, name in styles.items()}
+             for fam, styles in m["families"].items()}
+    _design["aliases"] = set()
+    for alias, fam in m.get("aliases", {}).items():
+        if alias not in found:
+            found[alias] = found[fam]
+            _design["aliases"].add(alias)
+    D._FONTS = found
+    _design["layout"] = D.Renderer(draft=True)
+    _design["full"] = D.Renderer(limit=24)
+    return json.dumps({"fonts": font_list(), "draft_dpi": D.DRAFT_DPI,
+                       "types": D.TYPE_LABELS, "ops": list(D.OPS)})
+
+
+def font_list():
+    """{family: [styles]} the page offers (bundled + added, without the Arial-style aliases)."""
+    import design as D
+    return {f: list(styles) for f, styles in sorted(D._FONTS.items(), key=lambda kv: kv[0].lower())
+            if f not in _design["aliases"]}
+
+
+def font_files(design_json):
+    """Font files (under /fonts) the design's text layers need, for the worker to fetch first."""
+    import design as D
+    need = set()
+    for layer in json.loads(design_json)["layers"]:
+        if layer["type"] in ("text", "arctext"):
+            p = D.font_path(layer.get("font", "Arial"), layer.get("style", "Regular"))
+            if p and p.startswith(FONT_DIR + "/") and not p.startswith(FONT_DIR + "/user/"):
+                need.add(p[len(FONT_DIR) + 1:])
+    return json.dumps(sorted(need))
+
+
+def add_font(name, data):
+    """A font file the user added: stored under /fonts/user, offered by its own family name."""
+    import hashlib
+    import os
+    import design as D
+    from PIL import ImageFont
+    raw = bytes(data.to_py())
+    os.makedirs(FONT_DIR + "/user", exist_ok=True)
+    path = f"{FONT_DIR}/user/{hashlib.sha1(raw).hexdigest()[:16]}{os.path.splitext(name)[1].lower() or '.ttf'}"
+    with open(path, "wb") as f:
+        f.write(raw)
+    try:
+        fam, style = ImageFont.truetype(path, 12).getname()
+    except Exception:
+        os.remove(path)
+        raise ValueError(f"{name} isn't a font file this app can read (use .ttf or .otf).")
+    D._FONTS.setdefault(fam, {})[style] = path
+    return json.dumps({"family": fam, "style": style, "fonts": font_list()})
+
+
+def add_asset(name, data):
+    """Stores an image / vector file for a design layer, named by its content like the desktop's
+    project assets (so a .lep made here and one made on the desktop share files). Returns its
+    path, which layers use as "src"."""
+    import hashlib
+    import os
+    import design as D
+    raw = bytes(data.to_py())
+    os.makedirs(D.PROJECTS_DIR, exist_ok=True)
+    ext = os.path.splitext(name)[1].lower()
+    path = f"{D.PROJECTS_DIR}/{hashlib.sha1(raw).hexdigest()[:16]}{ext}"
+    if not os.path.exists(path):
+        with open(path, "wb") as f:
+            f.write(raw)
+    out = {"path": path}
+    if ext in core.IMAGE_EXTENSIONS:
+        if path not in _files:
+            gray = _register(path, name, path)
+        else:
+            gray = _files[path]["gray"]
+        out.update(w=gray.width, h=gray.height)
+    return json.dumps(out)
+
+
+def _web_load_source(path, remove_bg=False, strokes=None, model=core.DEFAULT_BG_MODEL):
+    f = _files.get(path)
+    if not remove_bg:
+        return core.load_image(path), None
+    if f is None or f["alpha"] is None:
+        raise RuntimeError("The background hasn't been removed yet.")
+    alpha, src = _refined(f, strokes or [])
+    return src, alpha
+
+
+def _web_cached_alpha(path, strokes=None, model=core.DEFAULT_BG_MODEL):
+    f = _files.get(path)
+    if f is None or f["alpha"] is None:
+        return None
+    return _refined(f, strokes or [])[0]
+
+
+core.load_source = _web_load_source
+core.cached_cutout_alpha = _web_cached_alpha
+
+
+def cutouts_needed(design_json, mode):
+    """Asset paths whose background the worker has to remove before rendering (Design view and
+    export only; the Layout view uses a cut-out only once it exists, like the desktop's)."""
+    if mode == "layout":
+        return "[]"
+    need = []
+    for layer in json.loads(design_json)["layers"]:
+        if layer["type"] == "image" and layer.get("visible", True) and layer.get("src") and \
+                layer["settings"].get("remove_bg") and layer["src"] in _files and \
+                _files[layer["src"]]["alpha"] is None:
+            need.append(layer["src"])
+    return json.dumps(list(dict.fromkeys(need)))
+
+
+def new_design(material="wood", width_in=6.0, height_in=4.0, dpi=254):
+    import design as D
+    return json.dumps(D.new_design(material, width_in, height_in, dpi))
+
+
+def new_layer(kind, design_json, kw_json="{}"):
+    import design as D
+    return json.dumps(D.new_layer(kind, json.loads(design_json), **json.loads(kw_json)))
+
+
+def _rgba(value, cover, draft):
+    """A layer's bitmap for the page: gray (Layout) or black ink / white blank (Design), opaque
+    where the layer covers what's below it, transparent elsewhere."""
+    h, w = cover.shape
+    out = np.empty((h, w, 4), np.uint8)
+    g = value if draft else np.where(value, 0, 255).astype(np.uint8)
+    out[..., 0] = out[..., 1] = out[..., 2] = g
+    out[..., 3] = np.where(cover, 255, 0)
+    return to_js(memoryview(out.ravel()))
+
+
+def render_layers(design_json, mode="layout", preview_dpi=0, known_json="[]"):
+    """Every visible layer of the design as its own bitmap + score/cut lines, for the page to
+    draw. mode "layout" = the fast Layout view (photos as plain pictures, DRAFT_DPI); "design"
+    = the real engraving, rendered at preview_dpi (0 = the design's own DPI). Layers whose key is
+    in `known` (the page already has them) come back without pixels or lines.
+
+    Returns {dpi, layers: [{id, key, w_in, h_in, raster, [w, h, rgba], [vecs]}]}: rgba is
+    rotated already and centered on the layer's (x_in, y_in); vecs = {"cut"|"score":
+    [[points relative to the layer center, inches], closed]}."""
+    import design as D
+    import os
+    d = json.loads(design_json)
+    draft = mode == "layout"
+    if not draft and preview_dpi and preview_dpi < d["dpi"]:
+        d["dpi"] = int(preview_dpi)
+    r = _design["layout" if draft else "full"]
+    dpi = r.dpi(d)
+    known = set(json.loads(known_json))
+    out = []
+    for layer in d["layers"]:
+        if not layer.get("visible", True):
+            continue
+        if layer["type"] in ("image", "logo", "svg") and not (layer.get("src") and os.path.exists(layer["src"])):
+            continue
+        key = f"{mode}|{dpi}|{D._layer_key(layer, d)}"
+        if draft and layer["type"] == "image":
+            key += f"|cut={D.draft_cutout_ready(layer)}"
+        item = {"id": layer["id"], "key": key}
+        vecs = r.layer_vectors(layer, d)               # also sizes text layers
+        raster = D.has_raster(layer)
+        if raster:
+            value, cover = r.layer_masks(layer, d)
+        item.update(w_in=layer["w_in"], h_in=layer["h_in"], raster=raster)
+        if key not in known:
+            if raster:
+                item.update(w=int(cover.shape[1]), h=int(cover.shape[0]), rgba=_rgba(value, cover, draft))
+            x, y = layer["x_in"], layer["y_in"]
+            item["vecs"] = {k: [[[[px - x, py - y] for px, py in pts], bool(c)] for pts, c in paths]
+                            for k, paths in vecs.items()}
+        out.append(_js(item))
+    return _js({"dpi": dpi, "layers": to_js(out)})
+
+
+def export_design(design_json, name, factor=1.0):
+    """Writes the engraving files like the desktop's Save engraving (test copy if factor != 1)
+    and returns [{name, bytes}] for the page to download."""
+    import design as D
+    import os
+    import shutil
+    d = json.loads(design_json)
+    if factor != 1.0:
+        d = D.scaled_design(d, factor)
+        name += "_test"
+    out_dir = "/out"
+    shutil.rmtree(out_dir, ignore_errors=True)
+    os.makedirs(out_dir)
+    r = _design["full"] if factor == 1.0 else D.Renderer(limit=8)
+    written = D.save_engraving(d, r, f"{out_dir}/{name}.png")
+    files = []
+    for p in written:
+        with open(p, "rb") as f:
+            files.append(_js({"name": os.path.basename(p), "bytes": to_js(memoryview(f.read()))}))
+    return to_js(files)
+
+
+def save_project(design_json):
+    """The design as .lep bytes (same format as the desktop's)."""
+    import design as D
+    D.save_project(json.loads(design_json), "/tmp/project.lep")
+    with open("/tmp/project.lep", "rb") as f:
+        return to_js(memoryview(f.read()))
+
+
+def load_project(data):
+    """Opens .lep bytes: assets are unpacked (content-named) and registered; returns the design."""
+    import os
+    import design as D
+    with open("/tmp/open.lep", "wb") as f:
+        f.write(bytes(data.to_py()))
+    d = D.load_project("/tmp/open.lep")
+    for layer in d["layers"]:
+        src = layer.get("src")
+        if src and src not in _files and os.path.splitext(src)[1].lower() in core.IMAGE_EXTENSIONS:
+            _register(src, layer.get("name", ""), src)
+    return json.dumps(d)
 
 
 def materials():

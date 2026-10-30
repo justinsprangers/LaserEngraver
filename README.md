@@ -36,7 +36,8 @@ How it works:
   OpenCV and Pillow, then runs this folder's own `engrave_core.py` through `web/engine.py`.
   Any change to `engrave_core.py` or `materials.json` reaches the web version on the next push.
 - Stucki dithering is a small JavaScript loop in `worker.js` (numba doesn't run in browsers),
-  with the same math. Photo-style output is pixel-identical to the desktop app. Comic style
+  with the same math. Photo-style output is pixel-identical to the desktop app for PNG photos;
+  JPEGs decode very slightly differently in the browser, so their dots can differ. Comic style
   can differ in about 0.01% of pixels on images over 1200 px, from OpenCV's browser build.
 - Background removal runs the same u2net model with onnxruntime-web. The model is stored in
   `web/models/` in pieces (see its README), downloaded once and cached by the browser.
@@ -55,6 +56,14 @@ How it works:
   version, so a shared computer always has the originals; **Save as…** makes a personal copy.
 - The interface (`web/index.html`, `app.js`, `style.css`) is separate from the desktop's, so
   new interface features have to be added to each version.
+- **Design mode (in progress):** the browser already runs the desktop's design engine
+  (`design.py`, `vectors.py`) through `web/engine.py`; the Design-mode screens come next.
+  Fonts: browsers can't hand Python your installed fonts, so the web version uses the
+  open-licence fonts in `web/fonts/` (made by `python web/tools/make_fonts.py`; add a family
+  to its list and run it again). Arial, Times New Roman and Courier New in desktop projects use
+  Arimo, Tinos and Cousine, which have the same letter widths.
+  `python web/tools/compare_design.py design.json` renders a web design on the desktop to
+  check both give the same files.
 
 First visit downloads about 20 MB (Python + libraries, from the jsDelivr CDN); the AI model
 (176 MB) downloads the first time someone removes a background.
