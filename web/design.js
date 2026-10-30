@@ -21,6 +21,43 @@ const OP_LABELS = { engrave: "Engrave", score: "Score", cut: "Cut" };
 const PREVIEW_MAX_PX = 8e6;    // the Design view renders at a lower DPI above this many dots
 const KEEP_SPARE = 40;         // rendered layers kept for undo / show-hide beyond the visible ones
 const IMAGE_TYPES = /\.(png|jpe?g|bmp|webp|tiff?|gif)$/i;
+const FMT_LABELS = { none: "None", svg: "SVG", dxf: "DXF", "svg+dxf": "SVG + DXF" };
+const COMB_LABELS = { none: "None", svg: "SVG", pdf: "PDF", "svg+pdf": "SVG + PDF" };
+const GUARD_PX = 100e6;        // above this many dots, warn that saving may run out of memory
+const DETAIL_MAX_PX = 12e6;    // largest zoomed-in area rendered at full DPI
+const MIME = { png: "image/png", svg: "image/svg+xml", dxf: "application/dxf", pdf: "application/pdf" };
+
+// The design, its photos and added fonts, kept in this browser (IndexedDB) so they survive a
+// reload. Everything is wrapped: with storage blocked the app works, it just doesn't remember.
+const IDB = {
+  ok: false, db: null,
+  async open() {
+    try {
+      this.db = await new Promise((resolve, reject) => {
+        const r = indexedDB.open("laser-engraver-design", 1);
+        r.onupgradeneeded = () => { for (const s of ["kv", "assets", "fonts"]) r.result.createObjectStore(s); };
+        r.onsuccess = () => resolve(r.result);
+        r.onerror = () => reject(r.error);
+      });
+      this.ok = true;
+    } catch { this.ok = false; }
+  },
+  req(store, mode, fn) {
+    if (!this.ok) return Promise.resolve(undefined);
+    return new Promise((resolve) => {
+      try {
+        const r = fn(this.db.transaction(store, mode).objectStore(store));
+        r.onsuccess = () => resolve(r.result);
+        r.onerror = () => resolve(undefined);
+      } catch { resolve(undefined); }
+    });
+  },
+  get(store, key) { return this.req(store, "readonly", (s) => s.get(key)); },
+  put(store, key, v) { return this.req(store, "readwrite", (s) => s.put(v, key)); },
+  del(store, key) { return this.req(store, "readwrite", (s) => s.delete(key)); },
+  keys(store) { return this.req(store, "readonly", (s) => s.getAllKeys()).then((k) => k || []); },
+  clear(store) { return this.req(store, "readwrite", (s) => s.clear()); },
+};
 
 const rad = (d) => d * Math.PI / 180;
 const r4 = (v) => +(+v).toFixed(4);
@@ -42,6 +79,8 @@ Object.assign(DM, {
   templates: {},
   photoS: null, photoCurrent: null, photoStale: true, sWidth: null, strokeSig: "",
   lookSig: "", info2: "",
+  ver: 0, detail: null,        // ver counts design changes (a zoomed-in detail is for one version)
+  projectName: "", projectHandle: null, saveTimer: null,
 
   // ================================================================ helpers
 
@@ -98,8 +137,11 @@ Object.assign(DM, {
     try {
       this.info = await call("designInit");
       if (!this.design) {
-        this.design = await call("newDesign", { material: S.material, width_in: 6, height_in: 4, dpi: +S.dpi || 254 });
-        this.lastSnap = JSON.stringify(this.design);
+        await IDB.open();
+        if (!(await this.restoreSaved())) {
+          this.design = await call("newDesign", { material: S.material, width_in: 6, height_in: 4, dpi: +S.dpi || 254 });
+          this.lastSnap = JSON.stringify(this.design);
+        }
       }
       for (const k of ["shape", "text", "arctext"])
         this.templates[k] ||= await call("newLayer", { kind: k, design: this.design });
@@ -128,6 +170,8 @@ Object.assign(DM, {
     const v = LS.get("dview", "layout");
     setView(DESIGN_VIEWS.includes(v) || current ? v : "layout");
     this.showTab(LS.get("dtab", this.design.layers.length ? "layer" : "design"));
+    this.updateTitle();
+    this.requestRender();
     setStatus("Design mode: add photos, logos, text and shapes with Add (left).");
   },
 
@@ -136,6 +180,7 @@ Object.assign(DM, {
     if (this.drawKind) this.cancelDraw();
     this.commitNow();
     this.active = false;
+    this.updateTitle();
     LS.set("mode", "photos");
     setModeButtons("photos");
     document.body.classList.remove("design-mode");
@@ -234,6 +279,9 @@ Object.assign(DM, {
 
   changed() {
     this.dirty = true;
+    this.ver++;
+    this.updateTitle();
+    this.updateTestSize();
     this.requestRender();
     clearTimeout(this.commitTimer);
     this.commitTimer = setTimeout(() => this.commit(), 500);
@@ -247,6 +295,7 @@ Object.assign(DM, {
       this.redoStack = [];
     }
     this.lastSnap = now;
+    this.autosave();
   },
   commitNow() { if (this.commitTimer) { clearTimeout(this.commitTimer); this.commit(); } },
   undo() {
@@ -264,6 +313,9 @@ Object.assign(DM, {
     this.design = JSON.parse(snap);
     this.lastSnap = snap;
     this.dirty = true;
+    this.ver++;
+    this.autosave();
+    this.updateTitle();
     this.refreshDesignTab();
     this.select(this.layer(this.selected) ? this.selected : null);
     this.requestRender();
@@ -278,6 +330,8 @@ Object.assign(DM, {
     this.changed();
   },
   async addFiles(list, kind = "image") {
+    const lep = [...list].find((f) => /\.lep$/i.test(f.name));
+    if (lep) return this.confirmDiscard("Open this project?") && this.openProjectFile(lep);
     const imgs = [...list].filter((f) => f.type.startsWith("image/") || IMAGE_TYPES.test(f.name));
     if (!imgs.length) return;
     const c = this.design.canvas;
@@ -285,8 +339,10 @@ Object.assign(DM, {
       showProgress(`Adding ${file.name} (${i + 1} of ${imgs.length})…`, null);
       try {
         const bytes = new Uint8Array(await file.arrayBuffer());
+        const keep = IDB.ok ? bytes.slice() : null;                // (the original goes to the worker)
         const a = await call("addAsset", { name: file.name, bytes }, [bytes.buffer]);
         if (!a.w) throw new Error("it doesn't look like an image");
+        if (keep) await IDB.put("assets", a.path, { name: file.name, bytes: keep });
         const w = +(Math.min(c.width_in, c.height_in) * (kind === "image" ? 0.6 : 0.35)).toFixed(2);
         const l = await call("newLayer", { kind, design: this.design, kw: { src: a.path, name: file.name, w_in: w } });
         if (kind === "image") {
@@ -354,19 +410,214 @@ Object.assign(DM, {
     draw();
     this.changed();
   },
-  async newDesign() {
-    if (this.dirty && this.design.layers.length && !confirm("Start a new, empty design? The current one isn't saved.")) return;
+  async newDesign(force = false) {
+    if (!force && !this.confirmDiscard("Start a new, empty design?")) return;
     const d = this.design;
-    this.design = await call("newDesign", { material: d.material, width_in: d.canvas.width_in, height_in: d.canvas.height_in, dpi: d.dpi });
+    this.load(await call("newDesign", { material: d.material, width_in: d.canvas.width_in, height_in: d.canvas.height_in, dpi: d.dpi }), "");
+    this.showTab("design");
+  },
+  confirmDiscard(question) {
+    return !(this.dirty && this.design.layers.length) ||
+      confirm(`${question} The current design hasn't been saved as a project file (Save project).`);
+  },
+  // A different design on screen (new, opened, restored): fresh undo history.
+  load(design, name, dirty = false) {
+    this.design = design;
+    this.projectName = name;
+    this.projectHandle = null;
     this.undoStack = [];
     this.redoStack = [];
-    this.lastSnap = JSON.stringify(this.design);
-    this.dirty = false;
+    this.lastSnap = JSON.stringify(design);
+    this.dirty = dirty;
+    this.ver++;
+    this.detail = null;
     this.refreshDesignTab();
-    this.select(null);
-    this.fit();
+    const top = design.layers[design.layers.length - 1];
+    this.select(top ? top.id : null);
+    this.needFit = true;
+    if (this.shown()) this.fit();
     this.requestRender();
-    this.showTab("design");
+    this.updateTitle();
+    this.autosave();
+  },
+  updateTitle() {
+    document.title = this.active ? `${this.projectName || "Untitled design"}${this.dirty ? " *" : ""} · Laser Engraver`
+      : "Laser Engraver";
+  },
+  setDesignOpt(key, value) {
+    if (this.design[key] !== value) { this.design[key] = value; this.changed(); }
+  },
+  testFactor() { return (this.design.test_pct ?? 25) / 100; },
+  updateTestSize() {
+    const f = this.testFactor(), c = this.design.canvas, t = $("#testSize");
+    if (t) t.textContent = `→ ${(c.width_in * f).toFixed(2)} × ${(c.height_in * f).toFixed(2)} in`;
+  },
+
+  // ================================================================ saving files
+
+  // The engraving PNG, a cut / score file per job and the all-in-one file(s), as downloads.
+  // Same files and names as the desktop's Save engraving (factor < 1 = the test copy).
+  async exportDesign(factor = 1) {
+    const d = this.design;
+    if (!d.layers.length) return alert("Add something to the design first (Add).");
+    const dots = d.canvas.width_in * d.canvas.height_in * (d.dpi * factor) ** 2;
+    if (dots > GUARD_PX && !confirm(`This engraving is ${Math.round(dots / 1e6)} million dots. The browser may run out ` +
+      "of memory and reload the page (your design is kept). A lower DPI or a smaller canvas is safer. Continue?")) return;
+    const g = (v) => String(+v.toFixed(2));
+    const name = `${this.projectName || "design"}_${d.material}_${g(d.canvas.width_in * factor)}x` +
+      `${g(d.canvas.height_in * factor)}in_${d.dpi}dpi`;
+    showProgress(factor !== 1 ? "Saving the test copy…" : "Saving the engraving…", null);
+    try {
+      const files = await call("exportDesign", { design: d, name, factor });
+      doneProgress();
+      if (!files.length) return setStatus("Nothing to save: everything is hidden or empty.");
+      for (const [i, f] of files.entries()) {
+        if (i) await new Promise((r) => setTimeout(r, 300));      // browsers drop downloads fired too fast
+        saveBlob(new Blob([f.bytes], { type: MIME[f.name.split(".").pop()] || "application/octet-stream" }), f.name);
+      }
+      setStatus(`Saved ${files.map((f) => f.name).join(", ")}` +
+        (files.length > 1 ? " (your browser may ask to allow multiple downloads)" : ""));
+    } catch (e) { fail(`Saving failed: ${e.message}`); }
+  },
+
+  // Projects (.lep, the desktop's format). Where the browser allows it (Chrome, Edge), Save
+  // writes back to the file you opened or saved; elsewhere every save is a download.
+  async saveProject(asNew = false) {
+    try {
+      showProgress("Saving the project…", null);
+      const bytes = await call("saveProject", { design: this.design });
+      doneProgress();
+      const name = (this.projectName || "design") + ".lep";
+      if (window.showSaveFilePicker) {
+        if (asNew || !this.projectHandle) {
+          this.projectHandle = await showSaveFilePicker({ suggestedName: name,
+            types: [{ description: "Laser Engraver project", accept: { "application/octet-stream": [".lep"] } }] });
+        }
+        const w = await this.projectHandle.createWritable();
+        await w.write(bytes);
+        await w.close();
+        this.projectName = this.projectHandle.name.replace(/\.lep$/i, "");
+      } else {
+        if (asNew || !this.projectName) {
+          const n = prompt("Project name:", this.projectName || "design");
+          if (!n) return;
+          this.projectName = n.replace(/\.lep$/i, "").replace(/[\\/:*?"<>|]/g, "_");
+        }
+        saveBlob(new Blob([bytes], { type: "application/octet-stream" }), this.projectName + ".lep");
+      }
+      this.dirty = false;
+      this.updateTitle();
+      this.autosave();
+      setStatus(`Saved project ${this.projectName}.lep`);
+    } catch (e) {
+      doneProgress();
+      if (e.name !== "AbortError") fail(`Couldn't save the project: ${e.message}`);
+    }
+  },
+  async openProject() {
+    if (!this.confirmDiscard("Open another project?")) return;
+    if (!window.showOpenFilePicker) return $("#lepInput").click();      // -> openProjectFile
+    try {
+      const [h] = await showOpenFilePicker({ types: [{ description: "Laser Engraver project",
+        accept: { "application/octet-stream": [".lep"] } }] });
+      await this.openProjectFile(await h.getFile(), h);
+    } catch (e) { if (e.name !== "AbortError") fail(`Couldn't open the project: ${e.message}`); }
+  },
+  async openProjectFile(file, handle = null) {
+    showProgress(`Opening ${file.name}…`, null);
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const d = await call("openProject", { bytes }, [bytes.buffer]);
+      this.load(d, file.name.replace(/\.lep$/i, ""));
+      this.projectHandle = handle;
+      this.showTab(d.layers.length ? "layer" : "design");
+      doneProgress();
+      setStatus(`Opened ${file.name}`);
+      // Keep the project's photos in this browser too, for the saved copy.
+      const have = new Set(await IDB.keys("assets"));
+      for (const l of d.layers) {
+        if (IDB.ok && l.src && !have.has(l.src)) {
+          have.add(l.src);
+          await IDB.put("assets", l.src, { name: l.name || l.src.split("/").pop(), bytes: await call("readAsset", { path: l.src }) });
+        }
+      }
+    } catch (e) { fail(`Couldn't open ${file.name}: ${e.message}`); }
+  },
+
+  // ================================================================ kept in this browser
+
+  autosave() {
+    clearTimeout(this.saveTimer);
+    if (!IDB.ok || !this.design) return;
+    this.saveTimer = setTimeout(() => IDB.put("kv", "design",
+      { design: this.design, name: this.projectName, dirty: this.dirty }), 800);
+  },
+  async restoreSaved() {
+    const saved = await IDB.get("kv", "design");
+    if (!saved || !saved.design) return false;
+    showProgress("Opening your saved design…", null);
+    for (const k of await IDB.keys("fonts")) {
+      const f = await IDB.get("fonts", k);
+      try { this.info.fonts = (await call("addFont", { name: f.name, bytes: f.bytes })).fonts; } catch { /* skip it */ }
+    }
+    const need = new Set(saved.design.layers.map((l) => l.src).filter(Boolean));
+    for (const path of need) {
+      const a = await IDB.get("assets", path);
+      if (a) { try { await call("addAsset", { name: a.name, bytes: a.bytes }); } catch { /* layer shows nothing */ } }
+    }
+    for (const k of await IDB.keys("assets")) if (!need.has(k)) IDB.del("assets", k);   // (no longer used)
+    this.design = saved.design;
+    this.projectName = saved.name || "";
+    this.dirty = !!saved.dirty;
+    this.lastSnap = JSON.stringify(this.design);
+    return true;
+  },
+  async clearSaved() {
+    if (!confirm("Remove the design kept in this browser (with its photos and added fonts) and start a new, " +
+      "empty design? Project files you saved aren't affected.")) return;
+    for (const s of ["kv", "assets", "fonts"]) await IDB.clear(s);
+    await this.newDesign(true);
+    setStatus("Cleared the design kept in this browser");
+  },
+
+  // ================================================================ zoomed-in detail
+
+  // The Design view of a big canvas is rendered at a lower DPI (previewDpi). Zoomed in past
+  // that, the visible part is rendered again at full DPI and drawn on top.
+  wantDetail() {
+    if (view !== "design" || !this.previewDpi()) return;
+    const dpr = window.devicePixelRatio || 1, d = this.design;
+    if (this.zoom * dpr <= this.previewDpi() * 1.15) return;
+    const [ax, ay] = this.toInch(0, 0), [bx, by] = this.toInch(canvas.clientWidth, canvas.clientHeight);
+    const box = [Math.max(0, ax), Math.max(0, ay), Math.min(d.canvas.width_in, bx), Math.min(d.canvas.height_in, by)];
+    if (box[2] <= box[0] || box[3] <= box[1] || (box[2] - box[0]) * (box[3] - box[1]) * d.dpi ** 2 > DETAIL_MAX_PX) return;
+    const t = this.detail;
+    if (t && t.ver === this.ver && t.box[0] <= box[0] && t.box[1] <= box[1] && t.box[2] >= box[2] && t.box[3] >= box[3]) return;
+    clearTimeout(this.detailTimer);
+    this.detailTimer = setTimeout(() => this.requestDetail(box), 250);
+  },
+  async requestDetail(box) {
+    if (this.detailBusy) { this.detailAgain = true; return; }
+    this.detailBusy = true;
+    const ver = this.ver;
+    try {
+      const r = await call("renderRegion", { design: this.design, box });
+      if (ver === this.ver && r.w) {
+        const [blank, ink] = this.look().map(hexRGB), px = new Uint8ClampedArray(r.w * r.h * 4);
+        for (let i = 0; i < r.w * r.h; i++) {
+          const c = r.burn[i] ? ink : blank;
+          px[i * 4] = c[0]; px[i * 4 + 1] = c[1]; px[i * 4 + 2] = c[2]; px[i * 4 + 3] = 255;
+        }
+        const dpi = this.design.dpi;
+        this.detail = { ver, box: [r.x / dpi, r.y / dpi, (r.x + r.w) / dpi, (r.y + r.h) / dpi], dpi, x: r.x, y: r.y,
+          w: r.w, h: r.h, bmp: await createImageBitmap(new ImageData(px, r.w, r.h)) };
+        draw();
+      }
+    } catch { /* keep the lower-DPI view */ } finally {
+      doneProgress();
+      this.detailBusy = false;
+      if (this.detailAgain) { this.detailAgain = false; this.wantDetail(); }
+    }
   },
 
   // ================================================================ drawing shapes
@@ -543,8 +794,11 @@ Object.assign(DM, {
       if (p) t += `  ·  shown at ${p} DPI (big canvas; the saved engraving is full ${d.dpi} DPI)`;
       if (d.mirror) t += "  ·  mirrored on export";
     } else t += "  ·  Layout view: photos shown unprocessed (the Design view shows the engraving)";
+    const dots = d.canvas.width_in * d.canvas.height_in * d.dpi ** 2, big = dots > GUARD_PX;
+    if (big) t = `Very large: ${Math.round(dots / 1e6)} million dots, saving may run out of memory (lower the DPI ` +
+      `or the canvas size)  ·  ${t}`;
     $("#info").textContent = t;
-    $("#info").className = "";
+    $("#info").className = big ? "warn" : "";
     $("#designEmpty").hidden = n > 0;
   },
   onShown() {                  // a design view was switched to
@@ -597,7 +851,13 @@ Object.assign(DM, {
       ctx.drawImage(e.bmp, -e.w / 2 / e.dpi, -e.h / 2 / e.dpi, e.w / e.dpi, e.h / e.dpi);
       ctx.restore();
     }
+    const t = this.detail;
+    if (mode === "design" && t && t.ver === this.ver && !this.drag) {
+      ctx.imageSmoothingEnabled = k / t.dpi < 1;
+      ctx.drawImage(t.bmp, t.x / t.dpi, t.y / t.dpi, t.w / t.dpi, t.h / t.dpi);
+    }
     ctx.restore();
+    if (mode === "design") this.wantDetail();
     // Score / cut lines (blue / red), in screen pixels so they stay thin at any zoom.
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.lineWidth = 1.5;
@@ -930,6 +1190,7 @@ Object.assign(DM, {
     if (ctrl && k === "z") { e.preventDefault(); e.shiftKey ? this.redo() : this.undo(); return true; }
     if (ctrl && k === "y") { e.preventDefault(); this.redo(); return true; }
     if (ctrl && k === "d") { e.preventDefault(); this.duplicate(); return true; }
+    if (ctrl && k === "s") { e.preventDefault(); this.saveProject(e.shiftKey); return true; }
     if (ctrl || e.altKey) return false;
     if ((e.key === "Delete" || e.key === "Backspace") && this.selected) { e.preventDefault(); this.deleteLayer(); return true; }
     const arrows = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
@@ -973,6 +1234,19 @@ Object.assign(DM, {
       return;
     }
     p.append(el("h4", { className: "layer-title", id: "layerTitle", textContent: this.label(l) }));
+    if (l.type !== "svg") {                  // (vector files will choose a job per color instead)
+      const out = el("div", { className: "line radios", title: "Engrave: burned into the engraving image. " +
+        "Score: a light vector line (blue, _score file). Cut: a vector line through the material (red, _cut file). " +
+        "Shapes follow their outline, text its letter outlines, logos and photos their traced outline." },
+      el("b", { textContent: "Output" }));
+      for (const [v, t] of Object.entries(OP_LABELS)) {
+        const r = el("input", { type: "radio", name: "layerOp", value: v, checked: (l.op || "engrave") === v });
+        r.addEventListener("change", () => { this.set("op", v); this.buildLayerTab(); });
+        out.append(el("label", { className: "check" }, r, " " + t));
+      }
+      out.append(el("span", { className: "tip", textContent: "ⓘ" }));
+      p.append(out);
+    }
     let s = section(p, "Position & size");
     this.num(s, "X center (in)", "x_in", 0.05);
     this.num(s, "Y center (in)", "y_in", 0.05);
@@ -1015,6 +1289,16 @@ Object.assign(DM, {
       this.num(s, "Line width (mm)", "stroke_mm", 0.1, 0.1, 20);
       this.num(s, "Corner radius (in)", "corner_in", 0.05, 0, 10);
     }
+    if (t === "svg" || (l.op || "engrave") !== "engrave") {
+      s = section(p, "Score / cut lines");
+      if (t !== "shape") this.check(s, "Weld overlapping shapes", "weld", "Merges shapes that overlap (touching " +
+        "letters, stacked shapes) into one outline, so the laser doesn't cut through the middle.");
+      this.check(s, "Outer outline only (no holes)", "outer", "Keeps only the outside edge: a sticker / cut-out " +
+        "outline around the whole thing, with the insides of letters left alone.");
+      this.num(s, "Offset (mm)", "offset_mm", 0.5, -50, 50, false, "Pushes the lines out (+) or in (−): a margin " +
+        "around text or a logo, or kerf compensation (about half the laser's cut width). Offset and Outer outline " +
+        "also weld. Open lines aren't offset.");
+    }
   },
   row(parent, label, input, tip) {
     const r = el("div", { className: "row field" }, el("label", { textContent: label }), input);
@@ -1022,7 +1306,7 @@ Object.assign(DM, {
     parent.append(r);
     return r;
   },
-  num(parent, label, key, step, lo = -1000, hi = 1000, integer = false) {
+  num(parent, label, key, step, lo = -1000, hi = 1000, integer = false, tip = "") {
     const n = el("input", { type: "number", step, min: lo, max: hi });
     const set = (v) => { if (document.activeElement !== n) n.value = r4(v ?? 0); };
     set(this.sel()[key]);
@@ -1034,13 +1318,14 @@ Object.assign(DM, {
     });
     n.addEventListener("change", () => { n.value = r4(this.sel()[key]); });
     this.fields[key] = set;
-    this.row(parent, label, n);
+    this.row(parent, tip ? label + " ⓘ" : label, n, tip);
   },
-  check(parent, label, key) {
+  check(parent, label, key, tip = "") {
     const box = el("input", { type: "checkbox", checked: !!this.sel()[key] });
     box.addEventListener("change", () => this.set(key, box.checked));
     this.fields[key] = (v) => { box.checked = !!v; };
-    parent.append(el("div", { className: "line" }, el("label", { className: "check" }, box, " " + label)));
+    const lbl = el("label", { className: "check", title: tip }, box, " " + label + (tip ? " ⓘ" : ""));
+    parent.append(el("div", { className: "line" }, lbl));
   },
   choice(parent, label, key, options) {
     const sel = el("select");
@@ -1108,7 +1393,7 @@ Object.assign(DM, {
       "use look-alikes with the same letter widths), plus any you add.");
     this.row(parent, "Style", sty);
     const add = el("label", { className: "link", title: "Use a font file from your computer (.ttf or .otf). " +
-      "It stays in this page until you reload it." }, "Add a font…",
+      "It's kept in this browser with the design; others opening your project need it too." }, "Add a font…",
     el("input", { type: "file", accept: ".ttf,.otf,.ttc", hidden: true }));
     add.querySelector("input").addEventListener("change", async (e) => {
       const f = e.target.files[0];
@@ -1116,8 +1401,10 @@ Object.assign(DM, {
       if (!f) return;
       try {
         const bytes = new Uint8Array(await f.arrayBuffer());
+        const keep = IDB.ok ? bytes.slice() : null;
         const r = await call("addFont", { name: f.name, bytes }, [bytes.buffer]);
         this.info.fonts = r.fonts;
+        if (keep) await IDB.put("fonts", `${r.family}|${r.style}`, { name: f.name, bytes: keep });
         this.set("font", r.family, { style: r.style });
         this.buildLayerTab();
         setStatus(`Added the font ${r.family} ${r.style}`);
@@ -1206,6 +1493,50 @@ Object.assign(DM, {
     checkbox(s, "invert", "Invert (laser makes light marks)");
     checkbox(s, "mirror", "Mirror (engrave from the back)");
 
+    s = section(p, "Export");
+    this.exportFields = {};
+    const opt = (key, labels, label, tip) => {
+      const sel = el("select", {}, ...Object.entries(labels).map(([v, t]) => el("option", { value: v, textContent: t })));
+      sel.addEventListener("change", () => this.setDesignOpt(key, sel.value));
+      this.exportFields[key] = (v) => { sel.value = v === true ? "svg" : v === false ? "none" : v; };   // (a checkbox before v1.11)
+      this.row(s, label + " ⓘ", sel, tip);
+    };
+    opt("cut_format", FMT_LABELS, "Cut / score files", "One vector file per job, in mm: _cut (red lines) and _score " +
+      "(blue lines). SVG: xTool, LaserGRBL, LightBurn, Trotec Ruby. DXF: Trotec Ruby, LightBurn, xTool. Separate files " +
+      "suit LaserGRBL, which runs one power setting per file.");
+    const frame = el("input", { type: "checkbox" });
+    frame.addEventListener("change", () => this.setDesignOpt("frame", frame.checked));
+    this.exportFields.frame = (v) => { frame.checked = v !== false; };
+    s.append(el("div", { className: "line" }, el("label", { className: "check", title: "Adds a green rectangle the " +
+      "size of the canvas to the cut and score files. The engraving PNG is the same size: line their corners up in " +
+      "your laser software, then delete or disable the green frame." }, frame, " Add alignment frame ⓘ")));
+    opt("combined", COMB_LABELS, "All-in-one file", "One file with the engraving image and every score / cut line, " +
+      "already lined up (_combined.svg / .pdf): open it and assign the colors. PDF: Trotec Ruby, LightBurn, xTool. " +
+      "SVG: LightBurn, xTool. Not tested on every program: if the image doesn't come in, use the PNG + cut / score " +
+      "files instead.");
+    checkbox(s, "outline", "Cut outline around everything engraved");
+    slider(s, "outline_offset_in", 0, 1, 0.02, "Outline offset (in)");
+    const pct = el("input", { type: "number", min: 5, max: 100, step: 5 });
+    pct.addEventListener("input", () => {
+      const v = parseFloat(pct.value);
+      if (v >= 1 && v <= 100) this.setDesignOpt("test_pct", v);
+      this.updateTestSize();
+    });
+    this.exportFields.test_pct = (v) => { if (document.activeElement !== pct) pct.value = v ?? 25; };
+    this.row(s, "Test copy size (%)", pct);
+    const testBtn = el("button", { className: "btn sm", type: "button", textContent: "Save test copy",
+      title: "Saves a shrunken copy of the whole design (same DPI, material and settings, so it burns like the real " +
+        "job) to try on scrap first. Files end in _test." });
+    testBtn.addEventListener("click", () => this.exportDesign(this.testFactor()));
+    s.append(el("div", { className: "line" }, testBtn, el("span", { className: "hint", id: "testSize" })));
+
+    s = section(p, "This browser");
+    const clr = el("button", { className: "btn sm", type: "button", textContent: "Clear saved design",
+      title: "The design is kept in this browser (with its photos and added fonts) so it's still here next time. " +
+        "This removes that copy and starts a new, empty design. Project files you saved aren't touched." });
+    clr.addEventListener("click", () => this.clearSaved());
+    s.append(el("p", { className: "hint", id: "autosaveNote" }), clr);
+
     p.append(el("p", { className: "hint", textContent: "Material, DPI, invert and mirror apply to the whole design. " +
       "Each photo layer has its own style and settings: select it and use the Basic / Photo tuning / Comic tuning tabs." }));
     p.append(el("p", { className: "hint", textContent: "Arrange on the Layout view (fast; photos shown unprocessed), check " +
@@ -1220,6 +1551,10 @@ Object.assign(DM, {
   refreshDesignTab() {
     if (!this.canvasFields) return;
     for (const [k, n] of Object.entries(this.canvasFields)) n.value = this.design.canvas[k];
+    for (const [k, set] of Object.entries(this.exportFields)) set(this.design[k] ?? { cut_format: "svg", combined: "none" }[k]);
+    this.updateTestSize();
+    $("#autosaveNote").textContent = IDB.ok ? "Your design is saved in this browser as you work." :
+      "This browser isn't keeping a copy of the design (storage is blocked), so save a project file.";
     Object.assign(S, this.globals());
     refreshControls();
   },
@@ -1265,4 +1600,16 @@ $("#layerCopy").addEventListener("click", () => DM.duplicate());
 $("#layerHide").addEventListener("click", () => DM.toggleVisible());
 $("#layerDel").addEventListener("click", () => DM.deleteLayer());
 $("#newDesignBtn").addEventListener("click", () => DM.newDesign());
+$("#openProjectBtn").addEventListener("click", () => DM.openProject());
+$("#saveProjectBtn").addEventListener("click", () => DM.saveProject());
+$("#saveProjectAsBtn").addEventListener("click", () => DM.saveProject(true));
+$("#exportBtn").addEventListener("click", () => DM.exportDesign());
+$("#lepInput").addEventListener("change", (e) => { const f = e.target.files[0]; e.target.value = ""; if (f) DM.openProjectFile(f); });
+// Last-moment save of the design kept in this browser (normally saved 0.8 s after each change).
+window.addEventListener("pagehide", () => {
+  if (!DM.design || !IDB.ok) return;
+  DM.commitNow();
+  clearTimeout(DM.saveTimer);
+  IDB.put("kv", "design", { design: DM.design, name: DM.projectName, dirty: DM.dirty });
+});
 for (const b of document.querySelectorAll("#designViews button")) b.addEventListener("click", () => setView(b.dataset.view));

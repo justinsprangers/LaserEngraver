@@ -8,7 +8,7 @@
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <!-- ?v= makes browsers fetch a fresh copy after an update: bump it (all four, same number)
      whenever style.css, app.js, design.js, tour.js or worker.js change. -->
-<link rel="stylesheet" href="style.css?v=7">
+<link rel="stylesheet" href="style.css?v=8">
 </head>
 <body>
 <header class="topbar">
@@ -24,7 +24,12 @@
     </label>
     <button id="downloadBtn" class="btn photos-only" disabled title="Download the engraving PNG for the selected photo">Download PNG</button>
     <button id="downloadAllBtn" class="btn photos-only" disabled title="Download engravings for every open photo">Download all</button>
-    <button id="newDesignBtn" class="btn design-only" title="Start a new, empty design">New design</button>
+    <button id="newDesignBtn" class="btn ghost design-only" title="Start a new, empty design">New</button>
+    <button id="openProjectBtn" class="btn ghost design-only" title="Open a project (.lep, also from the desktop app)">Open…</button>
+    <button id="saveProjectBtn" class="btn ghost design-only" title="Save the project (Ctrl+S): the design and its photos in one .lep file">Save project</button>
+    <button id="saveProjectAsBtn" class="btn ghost design-only" title="Save the project under a new name (Ctrl+Shift+S)">Save as…</button>
+    <input id="lepInput" type="file" accept=".lep" hidden>
+    <button id="exportBtn" class="btn primary design-only" title="Download the engraving PNG and the cut / score files (Design tab → Export)">Save engraving</button>
     <span class="sep"></span>
     <button id="themeBtn" class="btn ghost" title="Light / dark theme">◐</button>
     <button id="tourBtn" class="btn ghost" title="A guided tour of the tools, with a sample photo">Tutorial</button>
@@ -206,8 +211,8 @@
   </form>
 </dialog>
 
-<script src="app.js?v=7"></script>
-<script src="design.js?v=7"></script>
-<script src="tour.js?v=7"></script>
+<script src="app.js?v=8"></script>
+<script src="design.js?v=8"></script>
+<script src="tour.js?v=8"></script>
 </body>
 </html>

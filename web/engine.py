@@ -361,6 +361,47 @@ def render_layers(design_json, mode="layout", preview_dpi=0, known_json="[]"):
     return _js({"dpi": dpi, "layers": to_js(out)})
 
 
+def render_region(design_json, x0, y0, x1, y1):
+    """The real engraving of part of the canvas (inches) at the design's full DPI, for the
+    Design view when zoomed in on a big canvas (whose whole view is shown at a lower DPI).
+    Returns {x, y, w, h (dots), burn (1 byte per dot, 1 = laser fires)}."""
+    import design as D
+    d = json.loads(design_json)
+    dpi = d["dpi"]
+    W, H = D._px(d["canvas"]["width_in"], dpi), D._px(d["canvas"]["height_in"], dpi)
+    px0, py0 = max(0, int(x0 * dpi)), max(0, int(y0 * dpi))
+    px1, py1 = min(W, int(x1 * dpi) + 1), min(H, int(y1 * dpi) + 1)
+    if px1 <= px0 or py1 <= py0:
+        return _js({"x": 0, "y": 0, "w": 0, "h": 0})
+    # Renderer.compose's stacking, with each layer placed exactly as in the full engraving
+    # (same rounding), but only the region is filled in.
+    import os
+    r = _design["full"]
+    burn = np.zeros((py1 - py0, px1 - px0), bool)
+    for layer in d["layers"]:
+        if not layer.get("visible", True) or not D.has_raster(layer):
+            continue
+        if layer["type"] in ("image", "logo", "svg") and not (layer.get("src") and os.path.exists(layer["src"])):
+            continue
+        ink, cover = r.layer_masks(layer, d)
+        h, w = ink.shape
+        x0, y0 = round(layer["x_in"] * dpi - w / 2), round(layer["y_in"] * dpi - h / 2)
+        cx0, cy0, cx1, cy1 = max(px0, x0), max(py0, y0), min(px1, x0 + w), min(py1, y0 + h)
+        if cx1 <= cx0 or cy1 <= cy0:
+            continue
+        sub_cov = cover[cy0 - y0:cy1 - y0, cx0 - x0:cx1 - x0]
+        region = burn[cy0 - py0:cy1 - py0, cx0 - px0:cx1 - px0]
+        region[sub_cov] = ink[cy0 - y0:cy1 - y0, cx0 - x0:cx1 - x0][sub_cov]
+    return _js({"x": px0, "y": py0, "w": int(burn.shape[1]), "h": int(burn.shape[0]),
+                "burn": to_js(memoryview(np.ascontiguousarray(burn, dtype=np.uint8).ravel()))})
+
+
+def read_asset(path):
+    """An asset file's bytes (for the page's saved copy of the design)."""
+    with open(path, "rb") as f:
+        return to_js(memoryview(f.read()))
+
+
 def export_design(design_json, name, factor=1.0):
     """Writes the engraving files like the desktop's Save engraving (test copy if factor != 1)
     and returns [{name, bytes}] for the page to download."""

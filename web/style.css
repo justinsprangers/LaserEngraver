@@ -175,6 +175,7 @@ body.dragging .drop { display: flex; }
 @keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(350%); } }
 .bar.wide { width: 100%; margin: 12px 0; }
 .error { color: var(--danger); }
+.warn { color: var(--warn); }
 
 /* --- Loading overlay and dialog */
 .overlay { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;

@@ -205,6 +205,11 @@ const handlers = {
     if (mode !== "layout") progress("Rendering the engraving…", null);
     return engine.render_layers(json, mode, previewDpi, JSON.stringify(known));
   },
+  renderRegion: async ({ design, box }) => {
+    const json = await prepareDesign(design, "design");
+    return engine.render_region(json, ...box);
+  },
+  readAsset: ({ path }) => engine.read_asset(path),
   exportDesign: async ({ design, name, factor = 1 }) => {
     const json = await prepareDesign(design, "export");
     progress("Saving the engraving…", null);

@@ -14,7 +14,7 @@ There are two versions that share the same processing code (`engrave_core.py`):
 - **Web version** (`web/`): runs in any modern browser with nothing to install, for sharing
   (e.g. a makerspace). Photo and comic styles, AI background removal with the same fix tools
   (smart keep / remove, brush keep / erase), presets, materials and PNG / outline downloads.
-  Design mode is being added (layouts work; saving files from it doesn't yet). Photos are
+  Design mode too, except vector files (SVG, PDF, AI, DXF), which are coming. Photos are
   processed on the viewer's own computer, never uploaded.
 
 ## Web version
@@ -60,8 +60,13 @@ How it works:
 - **Design mode (in progress):** **Photos | Design** at the top left. The browser runs the
   desktop's design engine (`design.py`, `vectors.py`) through `web/engine.py`; the screens are
   in `web/design.js` and work like the desktop's: add photos, logos, text, arc text and drawn
-  shapes, move / resize / rotate them with snapping, Layout and Design views, undo. Not yet:
-  saving the engraving and cut files, Engrave / Score / Cut choices, project files, vector files.
+  shapes, move / resize / rotate them with snapping, Layout and Design views, undo, Engrave /
+  Score / Cut with weld and offset, **Save engraving** (PNG, cut / score SVG or DXF, all-in-one
+  SVG or PDF, test copy) and `.lep` projects that open in both versions. The design (with its
+  photos and added fonts) is kept in the browser, so it's still there after a reload; **Clear
+  saved design** on the Design tab removes it. Not yet: vector files. Without PyMuPDF in the
+  browser, the all-in-one PDF is written by `vectors._write_pdf_plain` (the desktop uses it too
+  if PyMuPDF is missing).
   Fonts: browsers can't hand Python your installed fonts, so the web version uses the
   open-licence fonts in `web/fonts/` (made by `python web/tools/make_fonts.py`; add a family
   to its list and run it again). Arial, Times New Roman and Courier New in desktop projects use

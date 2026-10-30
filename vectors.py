@@ -528,7 +528,10 @@ def write_dxf(vecs, design, out_path, frame=False):
 def write_pdf(vecs, design, out_path, png_path=None):
     """One PDF page the size of the canvas: the engraving image (if any) with the score and cut
     lines on top as hairlines, all already lined up (Trotec Ruby reads PDF natively)."""
-    import pymupdf
+    try:
+        import pymupdf
+    except ImportError:                      # e.g. the web version (no PyMuPDF build for it)
+        return _write_pdf_plain(vecs, design, out_path, png_path)
     W, H = design["canvas"]["width_in"] * 72, design["canvas"]["height_in"] * 72
     doc = pymupdf.open()
     page = doc.new_page(width=W, height=H)
@@ -550,3 +553,56 @@ def write_pdf(vecs, design, out_path, png_path=None):
         shape.commit()
     doc.save(out_path, garbage=3, deflate=True)
     doc.close()
+
+
+def _write_pdf_plain(vecs, design, out_path, png_path=None):
+    """write_pdf without PyMuPDF: the same page written by hand (a 1-bit image + stroked paths)."""
+    import zlib
+    from PIL import Image
+    W, H = design["canvas"]["width_in"] * 72, design["canvas"]["height_in"] * 72
+    k = 72 / 25.4
+    ops, xobj, objs = [], "", []
+    if png_path:
+        with Image.open(png_path) as im:
+            img = im.convert("1")              # rows packed 8 pixels per byte, 1 = white
+        data = zlib.compress(img.tobytes(), 9)
+        objs.append(((f"<< /Type /XObject /Subtype /Image /Width {img.width} /Height {img.height} "
+                     f"/ColorSpace /DeviceGray /BitsPerComponent 1 /Filter /FlateDecode "
+                     f"/Length {len(data)} >>").encode(), data))
+        xobj = "/XObject << /Im0 6 0 R >>"
+        ops.append(f"q {W:.4f} 0 0 {H:.4f} 0 0 cm /Im0 Do Q")
+    ops.append(f"{HAIRLINE_MM * k:.4f} w 1 J 1 j")
+    for kind in KINDS:
+        paths = _mm(vecs.get(kind) or [], design)
+        if not paths:
+            continue
+        r, g, b = (int(COLORS[kind][i:i + 2], 16) / 255 for i in (1, 3, 5))
+        ops.append(f"{r:.3f} {g:.3f} {b:.3f} RG")
+        for pts, closed in paths:
+            if len(pts) < 2:
+                continue
+            seg = [f"{x * k:.3f} {H - y * k:.3f} {'l' if i else 'm'}" for i, (x, y) in enumerate(pts)]
+            ops.append(" ".join(seg) + (" h S" if closed else " S"))
+    content = zlib.compress("\n".join(ops).encode(), 9)
+    head = [b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            (f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {W:.4f} {H:.4f}] "
+             f"/Resources << {xobj} >> /Contents 4 0 R >>").encode(),
+            (f"<< /Length {len(content)} /Filter /FlateDecode >>".encode(), content),
+            b"<< /Producer (Laser Engraver) >>"]
+    out, offsets = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n"), []
+    for n, obj in enumerate(head + objs, 1):
+        offsets.append(len(out))
+        out += f"{n} 0 obj\n".encode()
+        if isinstance(obj, tuple):
+            out += obj[0] + b"\nstream\n" + obj[1] + b"\nendstream"
+        else:
+            out += obj
+        out += b"\nendobj\n"
+    xref = len(out)
+    out += f"xref\n0 {len(offsets) + 1}\n0000000000 65535 f \n".encode()
+    out += "".join(f"{o:010d} 00000 n \n" for o in offsets).encode()
+    out += (f"trailer\n<< /Size {len(offsets) + 1} /Root 1 0 R /Info 5 0 R >>\n"
+            f"startxref\n{xref}\n%%EOF\n").encode()
+    with open(out_path, "wb") as f:
+        f.write(out)
