@@ -10,7 +10,8 @@ datas = [
     (os.path.join(SPECPATH, "icon.ico"), "."),
 ]
 datas += collect_data_files("rembg")
-hiddenimports = collect_submodules("rembg.sessions")
+datas += collect_data_files("ezdxf")              # DXF import: font metrics and resources
+hiddenimports = collect_submodules("rembg.sessions") + collect_submodules("ezdxf.fonts")
 
 a = Analysis(
     [os.path.join(ROOT, "engrave_app.py")],

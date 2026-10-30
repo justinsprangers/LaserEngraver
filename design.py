@@ -1,18 +1,21 @@
 """
-design.py: multi-element engraving designs (images, logos, SVGs, text, arc text, shapes),
-compositing them into one engraving, and project files.
+design.py: multi-element engraving designs (images, logos, vector files, text, arc text,
+shapes), compositing them into one engraving, and project files.
 
 A design is a plain dict (so it saves straight to JSON):
     {"version", "canvas": {"width_in", "height_in"}, "dpi", "material", "invert", "mirror",
      "outline", "outline_offset_in", "layers": [layer, ...]}      # layers bottom -> top
 
 Every layer has: id, type, name, visible, x_in / y_in (center on the canvas, inches),
-w_in / h_in (unrotated size), rotation (degrees, clockwise). Type-specific fields are listed
-in new_layer(). Image layers carry their own photo/comic settings and cut-out fix strokes.
+w_in / h_in (unrotated size), rotation (degrees, clockwise), op (engrave / score / cut) and
+the vector options weld / outer / offset_mm. Type-specific fields are listed in new_layer().
+Image layers carry their own photo/comic settings and cut-out fix strokes. Vector-file layers
+(type "svg": SVG, PDF, AI or DXF) give every color its own job instead of op (vector_jobs).
 
 Rendering: each layer becomes two masks at the design DPI: `ink` (laser fires) and `cover`
-(the layer is opaque here and hides what's below). Layers are stacked bottom to top, then
-mirror is applied to the whole engraving last, so text flips correctly for back-engraving.
+(the layer is opaque here and hides what's below), plus score/cut lines (vectors.py). Layers
+are stacked bottom to top, then mirror is applied to the whole engraving last, so text flips
+correctly for back-engraving.
 """
 
 import copy
@@ -33,8 +36,9 @@ import engrave_core as core
 DESIGN_VERSION = 1
 PROJECT_EXT = ".lep"            # Laser Engraver Project: a zip with project.json + assets/
 LAYER_TYPES = ("image", "logo", "svg", "text", "arctext", "shape")
-TYPE_LABELS = {"image": "Photo", "logo": "Logo", "svg": "SVG", "text": "Text",
+TYPE_LABELS = {"image": "Photo", "logo": "Logo", "svg": "Vector", "text": "Text",
                "arctext": "Arc text", "shape": "Shape"}
+OPS = ("engrave", "score", "cut")
 # Image-layer fields that belong to each image (everything else in Settings is design-wide).
 LAYER_SETTING_FIELDS = (
     "style", "dither", "remove_bg", "bg_model", "contrast", "brightness", "gamma",
@@ -55,8 +59,9 @@ def new_design(material="wood", width_in=6.0, height_in=4.0, dpi=254):
     return {"version": DESIGN_VERSION, "canvas": {"width_in": width_in, "height_in": height_in},
             "dpi": dpi, "material": material, "invert": bool(m.get("invert", False)),
             "mirror": bool(m.get("mirror", False)), "outline": False, "outline_offset_in": 0.1,
-            # Export: vector file(s) for cut lines, alignment frame, combined SVG (image + cuts)
-            "cut_format": "svg", "frame": True, "combined": False,
+            # Export: vector file format for cut/score lines, alignment frame, combined file
+            # (engraving image + lines in one file: "none", "svg", "pdf" or "svg+pdf")
+            "cut_format": "svg", "frame": True, "combined": "none",
             "layers": []}
 
 
@@ -66,7 +71,10 @@ def new_layer(kind, design, **kw):
     base = {"id": uuid.uuid4().hex[:10], "type": kind, "name": TYPE_LABELS[kind], "visible": True,
             "x_in": cw / 2, "y_in": ch / 2, "w_in": min(cw, ch) * 0.6, "h_in": min(cw, ch) * 0.6,
             "rotation": 0.0,
-            "cut": kind == "shape"}       # Cut = exported as vector cut lines, not engraved
+            # engrave (raster) / score (blue vector line) / cut (red vector line)
+            "op": "cut" if kind == "shape" else "engrave",
+            # for score/cut lines: merge overlaps, outside edge only, grow/shrink (mm)
+            "weld": kind in ("text", "arctext"), "outer": False, "offset_mm": 0.0}
     if kind == "image":
         s = core.Settings(material=design["material"])
         materials = core.load_materials()
@@ -74,8 +82,14 @@ def new_layer(kind, design, **kw):
             s.apply_material(materials)          # start from the material's tone settings
         base.update(src="", settings={f: getattr(s, f) for f in LAYER_SETTING_FIELDS},
                     strokes=[], crop=[0.0, 0.0, 1.0, 1.0])
-    elif kind in ("logo", "svg"):
+    elif kind == "logo":
         base.update(src="", threshold=128, invert_art=False)
+    elif kind == "svg":
+        # jobs: {color group: job} (missing groups use vecfile.default_job); parts: item
+        # indexes shown by this layer (None = all, set by Break apart / Split by color);
+        # box: "content" (the drawing's bounds) or "page" (layers saved before v1.11);
+        # line_mm: width for engraved lines (0 = as drawn).
+        base.update(src="", jobs={}, jobs_from="auto", parts=None, box="content", line_mm=0.0)
     elif kind in ("text", "arctext"):
         base.update(text="Your text", font="Arial", style="Bold", size_pt=36.0, outline=False,
                     stroke_mm=0.4, tracking=0.0)
@@ -97,8 +111,9 @@ def source_aspect(layer):
     if not src or not os.path.exists(src):
         return layer["h_in"] / max(layer["w_in"], 1e-6)
     if layer["type"] == "svg":
-        r = _svg_page(src).rect
-        return r.height / max(r.width, 1e-6)
+        import vecfile
+        l, t, r, b = vector_box(layer, vecfile.load(src))
+        return (b - t) / (r - l)
     with Image.open(src) as im:
         w, h = ImageOps.exif_transpose(im).size
     if layer["type"] == "image":
@@ -112,6 +127,38 @@ def fit_to_source(layer, max_in=None):
     if max_in:
         layer["w_in"] = max_in
     layer["h_in"] = layer["w_in"] * source_aspect(layer)
+
+
+def vector_box(layer, doc):
+    """(l, t, r, b) page inches of the part of the file a vector layer shows."""
+    import vecfile
+    return vecfile.box(doc, layer.get("parts"), page=layer.get("box") == "page")
+
+
+def vector_size(layer, doc):
+    """The layer's real size (inches) at 1:1."""
+    l, t, r, b = vector_box(layer, doc)
+    return r - l, b - t
+
+
+def vector_jobs(layer, doc):
+    """{color group: job} for every color in the file (stored choices, else the default)."""
+    import vecfile
+    src = layer.get("jobs_from", "auto")
+    legacy = ("cut",) if src == "cut" else (
+        ("engrave", layer.get("threshold", 128), layer.get("invert_art", False)) if src == "engrave" else None)
+    stored = layer.get("jobs") or {}
+    return {k: stored.get(k) or vecfile.default_job(k, doc, legacy) for k, _, _ in vecfile.groups(doc)}
+
+
+def has_raster(layer):
+    """True if the layer puts anything in the engraving image (vs. only vector lines)."""
+    if layer["type"] != "svg":
+        return layer.get("op", "engrave") == "engrave"
+    import vecfile
+    doc = vecfile.load(layer["src"])
+    jobs = vector_jobs(layer, doc)
+    return any(jobs.get(k) in ("engrave", "blank") for k, _, _ in vecfile.groups(doc, layer.get("parts")))
 
 
 def layer_settings(layer, design):
@@ -194,25 +241,112 @@ def _L(mask):
     return Image.fromarray(np.where(mask, 255, 0).astype(np.uint8))
 
 
-def _svg_page(path):
-    import pymupdf
-    return pymupdf.open(path)[0]
-
-
 def render_logo(layer, dpi):
     size = (_px(layer["w_in"], dpi), _px(layer["h_in"], dpi))
     im = ImageOps.exif_transpose(Image.open(layer["src"])).convert("RGBA")
     return _art_masks(im.resize(size, Image.Resampling.LANCZOS), layer)
 
 
+def _local_box(arrays, pad, W, H):
+    """Pixel bounds (x0, y0, x1, y1) around point arrays, clipped to the layer, or None."""
+    pts = np.concatenate(arrays)
+    x0, y0 = max(0, int(np.floor(pts[:, 0].min() - pad)) - 1), max(0, int(np.floor(pts[:, 1].min() - pad)) - 1)
+    x1, y1 = min(W, int(np.ceil(pts[:, 0].max() + pad)) + 2), min(H, int(np.ceil(pts[:, 1].max() + pad)) + 2)
+    return (x0, y0, x1, y1) if x1 > x0 and y1 > y0 else None
+
+
+def _fill_mask(polys, evenodd, W, H):
+    """Filled area of one drawing item (its closed subpaths), with its fill rule."""
+    polys = [p for p, _ in polys if len(p) >= 3]
+    if not polys:
+        return None
+    b = _local_box(polys, 0, W, H)
+    if not b:
+        return None
+    x0, y0, x1, y1 = b
+    acc = np.zeros((y1 - y0, x1 - x0), np.int16)
+    for p in polys:
+        tmp = np.zeros_like(acc, np.uint8)
+        cv2.fillPoly(tmp, [np.round((p - (x0, y0)) * 16).astype(np.int32)], 1, cv2.LINE_8, shift=4)
+        sign = 1 if evenodd else (1 if _signed_area(p) > 0 else -1)     # nonzero winding
+        acc += sign * tmp.astype(np.int16)
+    return x0, y0, (acc & 1).astype(bool) if evenodd else acc != 0
+
+
+def _signed_area(p):
+    return 0.5 * float(np.sum(p[:, 0] * np.roll(p[:, 1], 1) - np.roll(p[:, 0], 1) * p[:, 1]))
+
+
+def _stroke_mask(polys, width, W, H, cap=0, join=0):
+    """One drawing item's lines, `width` px wide. Thick lines get the file's real caps and
+    corners (butt / round / square, miter / round / bevel) via shapely; thin ones are drawn
+    directly."""
+    b = _local_box([p for p, _ in polys], width * 2 + 1, W, H)
+    if not b:
+        return None
+    x0, y0, x1, y1 = b
+    m = np.zeros((y1 - y0, x1 - x0), np.uint8)
+    if width < 3:
+        for p, closed in polys:
+            if len(p) >= 2:
+                cv2.polylines(m, [np.round((p - (x0, y0)) * 16).astype(np.int32)], closed, 1,
+                              thickness=max(1, int(round(width))), lineType=cv2.LINE_8, shift=4)
+        return x0, y0, m.astype(bool)
+    from shapely.geometry import LineString, LinearRing
+    from shapely.ops import unary_union
+    import vectors
+    caps, joins = ("flat", "round", "square"), ("mitre", "round", "bevel")
+    lines = []
+    for p, closed in polys:
+        p = p - (x0, y0)
+        if len(p) < 2:
+            continue
+        line = LinearRing(p) if closed and len(p) >= 3 else LineString(p)
+        lines.append(line.buffer(width / 2, cap_style=caps[min(cap, 2)], join_style=joins[min(join, 2)],
+                                 mitre_limit=4.0, quad_segs=8))
+    rings = []
+    for poly in vectors.polygons(unary_union(lines)):
+        rings.append(np.asarray(poly.exterior.coords))
+        rings += [np.asarray(r.coords) for r in poly.interiors]
+    if rings:
+        cv2.fillPoly(m, [np.round(r * 16).astype(np.int32) for r in rings], 1, cv2.LINE_8, shift=4)
+    return x0, y0, m.astype(bool)
+
+
 def render_svg(layer, dpi):
-    import pymupdf
-    page = _svg_page(layer["src"])
-    w_px = _px(layer["w_in"], dpi)
-    zoom = w_px / max(page.rect.width, 1e-6)
-    pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=True)
-    im = Image.frombytes("RGBA", (pix.width, pix.height), pix.samples)
-    return _art_masks(im.resize((w_px, _px(layer["h_in"], dpi)), Image.Resampling.LANCZOS), layer)
+    """Vector-file layer: the colors set to Engrave burn, Blank ones hide what's under them
+    (in drawing order, like the file shows them). Score / Cut colors are vector lines."""
+    import vecfile
+    doc = vecfile.load(layer["src"])
+    jobs = vector_jobs(layer, doc)
+    l, t, r, b = vector_box(layer, doc)
+    W, H = _px(layer["w_in"], dpi), _px(layer["h_in"], dpi)
+    kx, ky = W / (r - l), H / (b - t)                    # page inches -> layer pixels
+    tol = 0.25 / max(kx, ky)
+    line_px = layer.get("line_mm", 0.0) / 25.4 * dpi
+    ink, cover = np.zeros((H, W), bool), np.zeros((H, W), bool)
+    for i in vecfile.part_ids(doc, layer.get("parts")):
+        it = doc["items"][i]
+        polys = None
+        for key in vecfile.item_keys(it):                # fill, then its outline
+            job = jobs.get(key)
+            if job not in ("engrave", "blank"):
+                continue
+            if polys is None:
+                polys = [(np.array([((x - l) * kx - 0.5, (y - t) * ky - 0.5)
+                                    for x, y in vecfile.flatten(s, tol)], np.float64), s[2]) for s in it["subs"]]
+            if key.startswith("f:"):
+                m = _fill_mask(polys, it["evenodd"], W, H)
+            else:
+                m = _stroke_mask(polys, line_px or it["width_in"] * (kx + ky) / 2, W, H,
+                                 it.get("cap", 0), it.get("join", 0))
+            if m is None:
+                continue
+            x0, y0, mk = m
+            sl = (slice(y0, y0 + mk.shape[0]), slice(x0, x0 + mk.shape[1]))
+            ink[sl][mk] = job == "engrave"
+            cover[sl] |= mk
+    return _L(ink), _L(cover)
 
 
 def render_text(layer, dpi):
@@ -370,19 +504,22 @@ class Renderer:
     def __init__(self, limit=40, draft=False):
         self.cache, self.limit, self.draft = {}, limit, draft
         self.path_cache = {}
-        self.placed = {}           # layer id -> (x0, y0, cover bool array) from the last render
-        self.cuts = {}             # layer id -> cut polylines (canvas inches) from the last render
+        self.placed = {}           # layer id -> [(x0, y0, mask bool array), ...] from the last render
+        self.vecs = {}             # layer id -> {"cut"/"score": polylines (canvas inches)}
 
-    def cut_paths(self, layer, design):
-        """A Cut layer's vector lines in canvas inches (cached relative to the layer's position,
-        so moving it is instant)."""
+    def layer_vectors(self, layer, design):
+        """A layer's score/cut lines in canvas inches, {kind: polylines} (cached relative to
+        the layer's position, so moving it is instant)."""
         import vectors
+        if layer["type"] != "svg" and layer.get("op", "engrave") not in vectors.COLORS:
+            return {}
         key = _layer_key(layer, design)
         hit = self.path_cache.get(key)
         if hit is None:
-            paths = vectors.layer_paths(layer, self, design)
+            vecs = vectors.layer_vectors(layer, self, design)
             size = (layer["w_in"], layer["h_in"]) if layer["type"] in ("text", "arctext") else None
-            rel = [([(x - layer["x_in"], y - layer["y_in"]) for x, y in pts], c) for pts, c in paths]
+            rel = {k: [([(x - layer["x_in"], y - layer["y_in"]) for x, y in pts], c) for pts, c in paths]
+                   for k, paths in vecs.items()}
             hit = (rel, size)
             if len(self.path_cache) >= self.limit:
                 self.path_cache.pop(next(iter(self.path_cache)))
@@ -390,10 +527,11 @@ class Renderer:
         rel, size = hit
         if size:
             layer["w_in"], layer["h_in"] = size
-        return [([(x + layer["x_in"], y + layer["y_in"]) for x, y in pts], c) for pts, c in rel]
+        return {k: [([(x + layer["x_in"], y + layer["y_in"]) for x, y in pts], c) for pts, c in paths]
+                for k, paths in rel.items()}
 
     def _line_mask(self, paths, dpi, width=4):
-        """Thick rasterized cut lines, so Cut items can be clicked on the canvas."""
+        """Thick rasterized vector lines, so Score / Cut items can be clicked on the canvas."""
         pts = [p for poly, _ in paths for p in poly]
         if not pts:
             return 0, 0, np.zeros((1, 1), bool)
@@ -451,23 +589,25 @@ class Renderer:
         H = _px(design["canvas"]["height_in"], dpi)
         burn = np.full((H, W), 255, np.uint8) if self.draft else np.zeros((H, W), bool)
         cover_all = np.zeros((H, W), bool)
-        self.placed, self.cuts = {}, {}
+        self.placed, self.vecs = {}, {}
         for layer in design["layers"]:
             if not layer.get("visible", True):
                 continue
             if layer["type"] in ("image", "logo", "svg") and not (layer.get("src") and os.path.exists(layer["src"])):
                 continue
-            if layer.get("cut"):
-                # Cut items aren't engraved: they become vector lines (shown red in the preview).
-                paths = self.cut_paths(layer, design)
-                self.cuts[layer["id"]] = paths
-                self.placed[layer["id"]] = self._line_mask(paths, dpi)
+            hit = self.placed[layer["id"]] = []
+            # Score / Cut items aren't engraved: they become vector lines (blue / red on the preview).
+            vecs = self.layer_vectors(layer, design)
+            if vecs:
+                self.vecs[layer["id"]] = vecs
+                hit.append(self._line_mask([p for paths in vecs.values() for p in paths], dpi))
+            if not has_raster(layer):
                 continue
             ink, cover = self.layer_masks(layer, design)
             h, w = ink.shape
             x0 = round(layer["x_in"] * dpi - w / 2)
             y0 = round(layer["y_in"] * dpi - h / 2)
-            self.placed[layer["id"]] = (x0, y0, cover)
+            hit.append((x0, y0, cover))
             # Clip to the canvas.
             cx0, cy0, cx1, cy1 = max(0, x0), max(0, y0), min(W, x0 + w), min(H, y0 + h)
             if cx1 <= cx0 or cy1 <= cy0:
@@ -498,26 +638,28 @@ class Renderer:
         """All visible layers under a pixel, topmost first."""
         found = []
         for layer in reversed(design["layers"]):
-            p = self.placed.get(layer["id"])
-            if not p or not layer.get("visible", True):
+            if not layer.get("visible", True):
                 continue
-            x0, y0, cover = p
-            h, w = cover.shape
-            lx, ly = int(x_px - x0), int(y_px - y0)
-            if -tolerance <= lx < w + tolerance and -tolerance <= ly < h + tolerance:
-                ys = slice(max(0, ly - tolerance), min(h, ly + tolerance + 1))
-                xs = slice(max(0, lx - tolerance), min(w, lx + tolerance + 1))
-                if cover[ys, xs].any():
-                    found.append(layer)
+            for x0, y0, cover in self.placed.get(layer["id"], []):
+                h, w = cover.shape
+                lx, ly = int(x_px - x0), int(y_px - y0)
+                if -tolerance <= lx < w + tolerance and -tolerance <= ly < h + tolerance:
+                    ys = slice(max(0, ly - tolerance), min(h, ly + tolerance + 1))
+                    xs = slice(max(0, lx - tolerance), min(w, lx + tolerance + 1))
+                    if cover[ys, xs].any():
+                        found.append(layer)
+                        break
         return found
 
 
 CUT_FORMATS = {"none": (), "svg": ("svg",), "dxf": ("dxf",), "svg+dxf": ("svg", "dxf")}
+COMBINED_FORMATS = {"none": (), "svg": ("svg",), "pdf": ("pdf",), "svg+pdf": ("svg", "pdf")}
 
 # Length fields (inches / mm / points) that shrink with the design for a test copy.
 # DPI, tone settings and dithering stay the same, so the dots burn like the real job.
 _SCALED_DESIGN = ("outline_offset_in",)
-_SCALED_LAYER = ("x_in", "y_in", "w_in", "h_in", "size_pt", "radius_in", "corner_in", "stroke_mm")
+_SCALED_LAYER = ("x_in", "y_in", "w_in", "h_in", "size_pt", "radius_in", "corner_in", "stroke_mm",
+                 "offset_mm", "line_mm")
 
 
 def scaled_design(design, factor):
@@ -534,39 +676,58 @@ def scaled_design(design, factor):
     return d
 
 
-def all_cut_paths(design, renderer, cover):
-    """Every cut line in the design (Cut items + the optional outline), canvas inches.
-    Call after renderer.compose()/engraving() so renderer.cuts is current."""
+def all_vectors(design, renderer, cover):
+    """Every vector line in the design, {"cut": polylines, "score": polylines} in canvas inches
+    (Score/Cut items + the optional outline, which is a cut). Call after renderer.compose() /
+    engraving() so renderer.vecs is current."""
     import vectors
-    paths = [p for lid in [l["id"] for l in design["layers"]] for p in renderer.cuts.get(lid, [])]
+    out = {k: [] for k in vectors.KINDS}
+    for layer in design["layers"]:
+        for k, paths in renderer.vecs.get(layer["id"], {}).items():
+            out[k] += paths
     if design.get("outline") and cover.any():
-        paths += vectors.outline_paths(cover, renderer.dpi(design), design.get("outline_offset_in", 0.1))
-    return paths
+        out["cut"] += vectors.outline_paths(cover, renderer.dpi(design), design.get("outline_offset_in", 0.1))
+    return out
+
+
+def combined_formats(design):
+    c = design.get("combined", "none")
+    c = {True: "svg", False: "none"}.get(c, c)             # (a checkbox before v1.11)
+    return COMBINED_FORMATS.get(c, ())
 
 
 def save_engraving(design, renderer, out_path):
-    """Writes the engraving PNG (if anything is engraved) and the cut-line file(s) chosen in the
-    design: <name>_cut.svg / _cut.dxf, plus <name>_combined.svg if enabled. Returns the files."""
+    """Writes the engraving PNG (if anything is engraved), one vector file per job in the chosen
+    format(s) (<name>_cut.svg / .dxf, <name>_score.svg / .dxf), and the combined file(s) if
+    enabled (<name>_combined.svg / .pdf: image + all lines, lined up). Returns the files."""
     import vectors
     burn, cover = renderer.compose(design)
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     written = []
+    png = None
     if burn.any():
         img = Image.fromarray(np.where(burn, 0, 255).astype(np.uint8)).convert("1")
         if design.get("mirror"):
             img = ImageOps.mirror(img)
         img.save(out_path, dpi=(design["dpi"], design["dpi"]))
         written.append(out_path)
-    paths = all_cut_paths(design, renderer, cover)
-    if paths:
-        base, frame = out_path[:-4], design.get("frame", True)
+        png = out_path
+    vecs = all_vectors(design, renderer, cover)
+    base, frame = out_path[:-4], design.get("frame", True)
+    for kind in vectors.KINDS:
+        if not vecs[kind]:
+            continue
         for fmt in CUT_FORMATS.get(design.get("cut_format", "svg"), ("svg",)):
-            f = f"{base}_cut.{fmt}"
-            (vectors.write_svg if fmt == "svg" else vectors.write_dxf)(paths, design, f, frame=frame)
+            f = f"{base}_{kind}.{fmt}"
+            (vectors.write_svg if fmt == "svg" else vectors.write_dxf)({kind: vecs[kind]}, design, f, frame=frame)
             written.append(f)
-        if design.get("combined"):
-            f = f"{base}_combined.svg"
-            vectors.write_svg(paths, design, f, frame=False, png_path=out_path if burn.any() else None)
+    if png or any(vecs.values()):
+        for fmt in combined_formats(design):
+            f = f"{base}_combined.{fmt}"
+            if fmt == "svg":
+                vectors.write_svg(vecs, design, f, frame=False, png_path=png)
+            else:
+                vectors.write_pdf(vecs, design, f, png_path=png)
             written.append(f)
     return written
 
@@ -622,8 +783,18 @@ def load_project(path):
 def _with_defaults(layer, design):
     """Fills in fields added in later versions so old projects keep opening."""
     filled = new_layer(layer["type"], design)
-    filled["cut"] = False             # items saved before Cut existed were all engraved
     filled.update(layer)
+    if "op" not in layer:
+        # Saved before Score existed (v1.10 and older): a Cut flag, and SVGs engraved by a
+        # dark threshold or cut along every path, at the size of their page.
+        filled["op"] = "cut" if layer.get("cut") else "engrave"
+        if layer["type"] in ("text", "arctext"):
+            filled["weld"] = False
+        if layer["type"] == "svg":
+            filled.update(jobs_from=filled["op"], box="page", jobs={})
+            filled.setdefault("threshold", 128)
+            filled.setdefault("invert_art", False)
+    filled.pop("cut", None)
     if layer["type"] == "image":
         settings = dict(new_layer("image", design)["settings"])
         settings.update(layer.get("settings", {}))

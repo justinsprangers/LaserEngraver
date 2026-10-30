@@ -22,7 +22,9 @@ from PIL import Image, ImageOps
 
 import design as D
 import engrave_core as core
-from ui_kit import ScrollTab, section
+import vecfile as V
+import vectors
+from ui_kit import P, ScrollTab, section
 from ui_kit import px as ui_px   # (named so it can't clash with local x/y variables)
 
 HANDLE = 6            # half-size of the corner handles, screen px
@@ -33,6 +35,11 @@ CANVAS_PRESETS = {"4 × 4 in (coaster)": (4, 4), "6 × 4 in": (6, 4), "8 × 8 in
                   "8 × 10 in": (8, 10), "12 × 12 in": (12, 12)}
 ASPECT_LOCKED = ("image", "logo", "svg")
 ART_TYPES = [("Images", " ".join("*" + e for e in core.IMAGE_EXTENSIONS)), ("All files", "*.*")]
+VECTOR_TYPES = [("Vector files", " ".join("*" + e for e in V.EXTENSIONS)), ("SVG", "*.svg"),
+                ("PDF / Illustrator", "*.pdf *.ai"), ("DXF (CAD)", "*.dxf"), ("All files", "*.*")]
+OP_LABELS = {"engrave": "Engrave", "score": "Score", "cut": "Cut"}
+LINE_COLORS = {"cut": "#ef4444", "score": "#3b82f6"}    # preview colors for cut / score lines
+SPLIT_WARN = 150         # Break apart asks first above this many pieces
 
 
 class DesignController:
@@ -44,7 +51,7 @@ class DesignController:
         self.draft = D.Renderer(draft=True)          # fast Layout view
         self.executor = ThreadPoolExecutor(max_workers=1)     # composites run off the UI thread
         self.gens = {"Layout": 0, "Design": 0}       # per-view render generation (drop stale results)
-        self.cut_preview = {"Layout": [], "Design": []}   # cut lines (canvas inches) per view
+        self.cut_preview = {"Layout": {}, "Design": {}}   # {cut/score: lines (canvas inches)} per view
         self.stale = {"Layout": True, "Design": True}
         self.active = False
         self.selected = None          # layer id
@@ -95,7 +102,7 @@ class DesignController:
         menu = tk.Menu(add, tearoff=False)
         menu.add_command(label="Photo…", command=lambda: self.add_art("image"))
         menu.add_command(label="Logo / clip art (PNG)…", command=lambda: self.add_art("logo"))
-        menu.add_command(label="SVG…", command=lambda: self.add_art("svg"))
+        menu.add_command(label="Vector file (SVG, PDF, AI, DXF)…", command=self.add_vector)
         menu.add_separator()
         menu.add_command(label="Text", command=lambda: self.add_simple("text"))
         menu.add_command(label="Arc text", command=lambda: self.add_simple("arctext"))
@@ -163,29 +170,35 @@ class DesignController:
 
         # --- Export
         f_ = section(f, "Export", row=2)
-        ttk.Label(f_, text="Cut lines file").grid(row=0, column=0, sticky="w", pady=3, padx=(0, 10))
+        ttk.Label(f_, text="Cut / score files").grid(row=0, column=0, sticky="w", pady=3, padx=(0, 10))
         self.cut_fmt = tk.StringVar(value=self._fmt_label(self.design.get("cut_format", "svg")))
         cf = ttk.Combobox(f_, textvariable=self.cut_fmt, state="readonly", width=12,
                           values=list(self.FMT_LABELS.values()))
         cf.grid(row=0, column=1, sticky="w")
         cf.bind("<<ComboboxSelected>>", lambda e: self._set_design_opt(
             "cut_format", next(k for k, v in self.FMT_LABELS.items() if v == self.cut_fmt.get())))
-        self.Tooltip(cf, "Vector file for items set to Cut (red lines, in mm).\n"
-                         "SVG: xTool, LaserGRBL, LightBurn, Trotec Ruby. DXF: Trotec Ruby, LightBurn, xTool.")
+        self.Tooltip(cf, "One vector file per job, in mm: _cut (red lines) and _score (blue lines).\n"
+                         "SVG: xTool, LaserGRBL, LightBurn, Trotec Ruby. DXF: Trotec Ruby, LightBurn, xTool.\n"
+                         "Separate files suit LaserGRBL, which runs one power setting per file.")
         self.frame_var = tk.BooleanVar(value=self.design.get("frame", True))
         cb = ttk.Checkbutton(f_, text="Add alignment frame ⓘ", variable=self.frame_var,
                              command=lambda: self._set_design_opt("frame", self.frame_var.get()))
         cb.grid(row=1, column=0, columnspan=3, sticky="w", pady=(4, 0))
-        self.Tooltip(cb, "Adds a blue rectangle the size of the canvas to the cut file.\n"
+        self.Tooltip(cb, "Adds a green rectangle the size of the canvas to the cut and score files.\n"
                          "The engraving PNG is the same size: line their corners up in your\n"
-                         "laser software, then delete or disable the blue frame.")
-        self.combined_var = tk.BooleanVar(value=self.design.get("combined", False))
-        cb = ttk.Checkbutton(f_, text="Also save combined SVG ⓘ", variable=self.combined_var,
-                             command=lambda: self._set_design_opt("combined", self.combined_var.get()))
-        cb.grid(row=2, column=0, columnspan=3, sticky="w", pady=(2, 0))
-        self.Tooltip(cb, "One SVG with the engraving image embedded under the cut lines, already\n"
-                         "lined up. Works in LightBurn; not tested in Trotec Ruby or xTool, so\n"
-                         "keep the separate PNG + cut file as the reliable option.")
+                         "laser software, then delete or disable the green frame.")
+        ttk.Label(f_, text="All-in-one file").grid(row=2, column=0, sticky="w", pady=3)
+        self.combined_var = tk.StringVar(value=self._comb_label(self.design.get("combined", "none")))
+        cc = ttk.Combobox(f_, textvariable=self.combined_var, state="readonly", width=12,
+                          values=list(self.COMB_LABELS.values()))
+        cc.grid(row=2, column=1, sticky="w")
+        cc.bind("<<ComboboxSelected>>", lambda e: self._set_design_opt(
+            "combined", next(k for k, v in self.COMB_LABELS.items() if v == self.combined_var.get())))
+        self.Tooltip(cc, "One file with the engraving image and every score / cut line, already\n"
+                         "lined up (_combined.svg / .pdf): open it and assign the colors.\n"
+                         "PDF: Trotec Ruby, LightBurn, xTool. SVG: LightBurn, xTool.\n"
+                         "Not tested on every program: if the image doesn't come in, use the\n"
+                         "PNG + cut / score files instead.")
         cb = ttk.Checkbutton(f_, text="Cut outline around everything engraved", variable=app.vars["outline"])
         cb.grid(row=3, column=0, columnspan=3, sticky="w", pady=(2, 0))
         ttk.Label(f_, text="Outline offset (in)").grid(row=4, column=0, sticky="w", pady=3)
@@ -220,9 +233,14 @@ class DesignController:
             row=r, column=0, columnspan=3, sticky="w", pady=(2, 0))
 
     FMT_LABELS = {"none": "None", "svg": "SVG", "dxf": "DXF", "svg+dxf": "SVG + DXF"}
+    COMB_LABELS = {"none": "None", "svg": "SVG", "pdf": "PDF", "svg+pdf": "SVG + PDF"}
 
     def _fmt_label(self, key):
         return self.FMT_LABELS.get(key, "SVG")
+
+    def _comb_label(self, key):
+        key = {True: "svg", False: "none"}.get(key, key)        # (a checkbox before v1.11)
+        return self.COMB_LABELS.get(key, "None")
 
     def _set_design_opt(self, key, value):
         if self.design.get(key) != value:
@@ -320,9 +338,29 @@ class DesignController:
         elif layer["type"] == "shape":
             detail = {"rect": "rectangle", "ellipse": "ellipse", "line": "line"}[layer.get("shape", "rect")]
         else:
-            detail = os.path.basename(layer.get("src", "")) or "(no file)"
-        return (("✂ " if layer.get("cut") else "") + f"{kind}: {detail}"
+            # The file's own name (project files store images under content hashes).
+            named = layer.get("name") not in (None, "", kind)
+            detail = layer["name"] if named else (os.path.basename(layer.get("src", "")) or "(no file)")
+            if layer["type"] == "svg" and layer.get("parts") is not None:
+                n = len(layer["parts"])
+                detail += f" ({n} piece{'s' if n != 1 else ''})"
+        op = self._ops_text(layer)
+        return (f"{kind}: {detail}" + (f"  [{op}]" if op else "")
                 + ("" if layer.get("visible", True) else "  (hidden)"))
+
+    def _ops_text(self, layer):
+        """'Cut', 'Score', 'Engrave + Cut'... (empty for plain engraving)."""
+        if layer["type"] != "svg":
+            op = layer.get("op", "engrave")
+            return "" if op == "engrave" else OP_LABELS[op]
+        try:
+            doc = V.load(layer["src"])
+            jobs = D.vector_jobs(layer, doc)
+            used = {jobs.get(k) for k, _, _ in V.groups(doc, layer.get("parts"))}
+        except Exception:
+            return ""
+        names = [OP_LABELS[o] for o in ("engrave", "score", "cut") if o in used]
+        return "" if names in ([], ["Engrave"]) else " + ".join(names)
 
     def refresh_list(self):
         lb = self.layer_list
@@ -335,6 +373,9 @@ class DesignController:
                 if l["id"] == self.selected:
                     lb.selection_set(i)
                     lb.see(i)
+        title = getattr(self, "title_label", None)
+        if title is not None and title.winfo_exists() and self.sel_layer():
+            title.configure(text=self._label(self.sel_layer()))
 
     def update_title(self):
         app = self.app
@@ -360,7 +401,7 @@ class DesignController:
             self.ch_var.set(d["canvas"]["height_in"])
             self.cut_fmt.set(self._fmt_label(d.get("cut_format", "svg")))
             self.frame_var.set(d.get("frame", True))
-            self.combined_var.set(d.get("combined", False))
+            self.combined_var.set(self._comb_label(d.get("combined", "none")))
             self.test_pct.set(f"{d.get('test_pct', 25):g}")
         finally:
             self._guard = False
@@ -406,22 +447,26 @@ class DesignController:
         f.columnconfigure(1, weight=1)
         layer = self.sel_layer()
         if not layer:
-            ttk.Label(f, text="No layer selected.\n\nUse Add above to add a photo, logo, SVG,\n"
-                              "text, arc text or shape, or click an item\non the Design view.",
+            ttk.Label(f, text="No layer selected.\n\nUse Add above to add a photo, logo, vector\n"
+                              "file (SVG, PDF, DXF), text, arc text or shape,\nor click an item "
+                              "on the Design view.",
                       style="Hint.TLabel", justify="left").grid(row=0, column=0, sticky="w")
             return
-        ttk.Label(f, text=self._label(layer), style="Title.TLabel").grid(row=0, column=0, columnspan=3, sticky="w")
-        out = ttk.Frame(f)
-        out.grid(row=1, column=0, columnspan=3, sticky="w", pady=(4, 2))
-        ttk.Label(out, text="Output:").pack(side="left")
-        cut_var = tk.StringVar(value="cut" if layer.get("cut") else "engrave")
-        for text, val in (("Engrave", "engrave"), ("Cut (vector) ⓘ", "cut")):
-            rb = ttk.Radiobutton(out, text=text, value=val, variable=cut_var)
-            rb.pack(side="left", padx=(6, 0))
-        self.Tooltip(rb, "Cut: exported as red vector lines in the cut file (SVG/DXF) instead of\n"
-                         "being engraved. Shapes cut along their outline, text along its letter\n"
-                         "outlines, SVGs along their paths, logos and photos along their outline.")
-        cut_var.trace_add("write", lambda *_: self._guard or self._set("cut", cut_var.get() == "cut"))
+        self.title_label = ttk.Label(f, text=self._label(layer), style="Title.TLabel", wraplength=320)
+        self.title_label.grid(row=0, column=0, columnspan=3, sticky="w")
+        if layer["type"] != "svg":                 # vector files choose a job per color instead
+            out = ttk.Frame(f)
+            out.grid(row=1, column=0, columnspan=3, sticky="w", pady=(4, 2))
+            ttk.Label(out, text="Output:").pack(side="left")
+            op_var = tk.StringVar(value=layer.get("op", "engrave"))
+            for text, val in (("Engrave", "engrave"), ("Score", "score"), ("Cut ⓘ", "cut")):
+                rb = ttk.Radiobutton(out, text=text, value=val, variable=op_var)
+                rb.pack(side="left", padx=(6, 0))
+            self.Tooltip(rb, "Engrave: burned into the engraving image.\n"
+                             "Score: a light vector line (blue, _score file). Cut: a vector line\n"
+                             "through the material (red, _cut file). Shapes follow their outline,\n"
+                             "text its letter outlines, logos and photos their traced outline.")
+            op_var.trace_add("write", lambda *_: self._guard or self._set_op(op_var.get()))
         r = 2
         r = self._num(f, r, "X center (in)", "x_in", 0.05)
         r = self._num(f, r, "Y center (in)", "y_in", 0.05)
@@ -440,7 +485,9 @@ class DesignController:
             ttk.Label(f, text="Style, tone and background removal for this photo\n"
                               "are on the Basic / Photo / Comic tabs.",
                       style="Hint.TLabel", justify="left").grid(row=r, column=0, columnspan=3, sticky="w", pady=(6, 0))
-        elif t in ("logo", "svg"):
+        elif t == "svg":
+            r = self._vector_panel(f, r, layer)
+        elif t == "logo":
             r = self._num(f, r, "Dark threshold (0-255)", "threshold", 5, lo=0, hi=255, integer=True)
             r = self._check(f, r, "Engrave the light parts instead", "invert_art")
             ttk.Label(f, text="Opaque pixels darker than the threshold are engraved;\n"
@@ -464,7 +511,187 @@ class DesignController:
             r = self._check(f, r, "Filled", "fill")
             r = self._num(f, r, "Line width (mm)", "stroke_mm", 0.1, lo=0.1, hi=20)
             r = self._num(f, r, "Corner radius (in)", "corner_in", 0.05, lo=0, hi=10)
+        if t == "svg" or layer.get("op", "engrave") != "engrave":
+            r = self._line_options(f, r, layer)
         self.app.scaler.refresh(f)                 # new widgets: scale their spacing
+
+    def _set_op(self, op):
+        self._set("op", op)
+        self.app.root.after_idle(self._build_layer_tab)      # show / hide the line options
+
+    def _line_options(self, f, r, layer):
+        """Weld / outer outline / offset for the layer's score and cut lines."""
+        ttk.Separator(f).grid(row=r, column=0, columnspan=3, sticky="ew", pady=6)
+        ttk.Label(f, text="Score / cut lines", style="Section.TLabel").grid(row=r + 1, column=0, columnspan=3, sticky="w")
+        r += 2
+        if layer["type"] != "shape":
+            r = self._check(f, r, "Weld overlapping shapes ⓘ", "weld")
+            self.Tooltip(f.grid_slaves(row=r - 1, column=0)[0],
+                         "Merges shapes that overlap (touching letters, stacked shapes)\n"
+                         "into one outline, so the laser doesn't cut through the middle.")
+        r = self._check(f, r, "Outer outline only (no holes) ⓘ", "outer")
+        self.Tooltip(f.grid_slaves(row=r - 1, column=0)[0],
+                     "Keeps only the outside edge: a sticker / cut-out outline around\n"
+                     "the whole thing, with the insides of letters left alone.")
+        r = self._num(f, r, "Offset (mm) ⓘ", "offset_mm", 0.5, lo=-50, hi=50)
+        self.Tooltip(f.grid_slaves(row=r - 1, column=0)[0],
+                     "Pushes the lines out (+) or in (−): a margin around text or a logo,\n"
+                     "or kerf compensation (about half the laser's cut width).\n"
+                     "Offset and Outer outline also weld. Open lines aren't offset.")
+        return r
+
+    # ---------------------------------------------------------------- vector files
+
+    def _vector_panel(self, f, r, layer):
+        """File info, size buttons, a job per color, engraved line width, split buttons."""
+        try:
+            doc = V.load(layer["src"])
+        except Exception as e:
+            ttk.Label(f, text=f"Couldn't read the file:\n{e}", style="Warn.TLabel", wraplength=320,
+                      justify="left").grid(row=r, column=0, columnspan=3, sticky="w")
+            return r + 1
+        n = len(V.part_ids(doc, layer.get("parts")))
+        w, h = D.vector_size(layer, doc)
+        info = (f"{os.path.basename(layer['src'])}\n{n} shape{'s' if n != 1 else ''}, "
+                f"{w * 25.4:.1f} × {h * 25.4:.1f} mm at 1:1"
+                + (f" (now {layer['w_in'] / w * 100:.0f}%)" if abs(layer["w_in"] / w - 1) > 0.001 else ""))
+        ttk.Label(f, text=info, style="Hint.TLabel", justify="left", wraplength=320).grid(
+            row=r, column=0, columnspan=3, sticky="w")
+        r += 1
+        for note in doc["notes"] + ([] if doc["sized"] else
+                                    ["The file doesn't state a physical size: set the width here."]):
+            ttk.Label(f, text="• " + note, style="Warn.TLabel", wraplength=320, justify="left").grid(
+                row=r, column=0, columnspan=3, sticky="w")
+            r += 1
+        row = ttk.Frame(f)
+        row.grid(row=r, column=0, columnspan=3, sticky="w", pady=(4, 2))
+        b = ttk.Button(row, text="1:1 size", command=self.vector_real_size)
+        b.pack(side="left")
+        self.Tooltip(b, "Back to the size saved in the file (no rotation).")
+        if layer.get("parts") is None:
+            b = ttk.Button(row, text="Canvas = file page", command=self.vector_canvas_to_page)
+            b.pack(side="left", padx=(4, 0))
+            self.Tooltip(b, "Makes the canvas the size of the file's page and puts the drawing\n"
+                            "where it sits on that page (1:1), e.g. for a ready-made cut sheet.")
+        r += 1
+        ttk.Label(f, text="What the laser does with each color ⓘ", style="Section.TLabel").grid(
+            row=r, column=0, columnspan=3, sticky="w", pady=(8, 2))
+        self.Tooltip(f.grid_slaves(row=r, column=0)[0],
+                     "Engrave: burned into the image. Score: a light line along it (blue).\n"
+                     "Cut: cut along it (red). Blank: not burned, and hides anything under it.\n"
+                     "Ignore: left out. Fill colors score / cut along their outline.\n"
+                     "Defaults: red lines cut, blue lines score, hairlines (< 0.1 mm) cut,\n"
+                     "dark fills and thick lines engrave, light colors are blank.")
+        r += 1
+        jobs = D.vector_jobs(layer, doc)
+        labels = [V.JOB_LABELS[j] for j in V.JOBS]
+        for key, count, label in V.groups(doc, layer.get("parts")):
+            line = ttk.Frame(f)
+            line.grid(row=r, column=0, columnspan=3, sticky="ew", pady=1)
+            sw = tk.Canvas(line, width=ui_px(22), height=ui_px(14), highlightthickness=0, bg=P["bg"])
+            color = key[2:]
+            if key.startswith("s:"):
+                sw.create_line(ui_px(2), ui_px(7), ui_px(20), ui_px(7), fill=color, width=ui_px(3))
+            else:
+                sw.create_rectangle(ui_px(2), ui_px(1), ui_px(20), ui_px(13), fill=color, outline=P["border"])
+            sw.pack(side="left")
+            ttk.Label(line, text=f"{label} ({count})").pack(side="left", padx=(6, 0))
+            var = tk.StringVar(value=V.JOB_LABELS[jobs.get(key, "engrave")])
+            cb = ttk.Combobox(line, textvariable=var, values=labels, state="readonly", width=14)
+            cb.pack(side="right")
+            cb.bind("<<ComboboxSelected>>", lambda e, k=key, v=var: self._set_job(k, v.get()))
+            r += 1
+        r = self._num(f, r, "Engraved line width (mm) ⓘ", "line_mm", 0.05, lo=0, hi=20)
+        self.Tooltip(f.grid_slaves(row=r - 1, column=0)[0],
+                     "Width for line colors set to Engrave. 0 = as drawn in the file\n"
+                     "(hairlines still burn one dot wide).")
+        row = ttk.Frame(f)
+        row.grid(row=r, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        b = ttk.Button(row, text="Break apart", command=lambda: self.split_vector("item"))
+        b.pack(side="left")
+        self.Tooltip(b, "Makes every shape in the file its own layer, so you can move, delete\n"
+                        "or set each one separately. Ctrl+Z undoes it.")
+        b = ttk.Button(row, text="Split by color", command=lambda: self.split_vector("color"))
+        b.pack(side="left", padx=(4, 0))
+        self.Tooltip(b, "One layer per color.")
+        return r + 1
+
+    def _set_job(self, key, label):
+        layer = self.sel_layer()
+        if not layer:
+            return
+        job = next(j for j, l in V.JOB_LABELS.items() if l == label)
+        layer.setdefault("jobs", {})[key] = job
+        self.refresh_list()
+        self.changed()
+
+    def vector_real_size(self):
+        layer = self.sel_layer()
+        if not layer or layer["type"] != "svg":
+            return
+        layer["w_in"], layer["h_in"] = D.vector_size(layer, V.load(layer["src"]))
+        layer["rotation"] = 0.0
+        self._build_layer_tab()
+        self.changed()
+
+    def vector_canvas_to_page(self):
+        layer = self.sel_layer()
+        if not layer or layer["type"] != "svg":
+            return
+        doc = V.load(layer["src"])
+        l, t, r, b = D.vector_box(layer, doc)
+        layer.update(w_in=r - l, h_in=b - t, rotation=0.0, x_in=(l + r) / 2, y_in=(t + b) / 2)
+        self.design["canvas"] = {"width_in": round(doc["w_in"], 4), "height_in": round(doc["h_in"], 4)}
+        self._guard = True
+        self.cw_var.set(self.design["canvas"]["width_in"])
+        self.ch_var.set(self.design["canvas"]["height_in"])
+        self._guard = False
+        self.app.zoom_fit()
+        self._build_layer_tab()
+        self.changed()
+
+    def split_vector(self, by):
+        """Break apart (one layer per shape) or split by color (one layer per color group).
+        Each new layer shows its shapes exactly where they were."""
+        layer = self.sel_layer()
+        if not layer or layer["type"] != "svg":
+            return
+        doc = V.load(layer["src"])
+        ids = V.part_ids(doc, layer.get("parts"))
+        buckets = {}
+        for i in ids:
+            key = i if by == "item" else (V.item_keys(doc["items"][i]) or ["?"])[0]
+            buckets.setdefault(key, []).append(i)
+        pieces = list(buckets.values())
+        if len(pieces) < 2:
+            messagebox.showinfo("Nothing to split", "This layer has only one "
+                                + ("shape." if by == "item" else "color."))
+            return
+        if len(pieces) > SPLIT_WARN and not messagebox.askyesno(
+                "Many pieces", f"This makes {len(pieces)} layers. Continue?"):
+            return
+        l0, t0, r0, b0 = D.vector_box(layer, doc)
+        sx, sy = layer["w_in"] / (r0 - l0), layer["h_in"] / (b0 - t0)
+        a = math.radians(layer["rotation"])
+        ca, sa = math.cos(a), math.sin(a)
+        new = []
+        for part in pieces:
+            nl = copy.deepcopy(layer)
+            nl.update(id=uuid.uuid4().hex[:10], parts=part, box="content")
+            l, t, r, b = V.box(doc, part)
+            dx, dy = ((l + r) / 2 - (l0 + r0) / 2) * sx, ((t + b) / 2 - (t0 + b0) / 2) * sy
+            nl.update(w_in=(r - l) * sx, h_in=(b - t) * sy,
+                      x_in=layer["x_in"] + dx * ca - dy * sa, y_in=layer["y_in"] + dx * sa + dy * ca)
+            if by == "color":
+                color = V.group_label((V.item_keys(doc["items"][part[0]]) or ["f:#000000"])[0])
+                nl["name"] = f"{layer.get('name') or os.path.basename(layer['src'])} – {color}"
+            new.append(nl)
+        layers = self.design["layers"]
+        i = layers.index(layer)
+        layers[i:i + 1] = new
+        self.select(new[-1]["id"])
+        self.changed()
+        self.app.set_status(f"Split into {len(new)} layers (Ctrl+Z to undo)")
 
     def _num(self, f, r, label, key, step, lo=-1000.0, hi=1000.0, integer=False):
         layer = self.sel_layer()
@@ -596,7 +823,7 @@ class DesignController:
             self.app.suspend_traces = True
             self.app.vars["width_in"].set(round(layer["w_in"], 3))
             self.app.suspend_traces = False
-        if key in ("shape", "cut"):
+        if key in ("shape", "op"):
             self.refresh_list()
         self.changed()
 
@@ -697,18 +924,49 @@ class DesignController:
         self.changed()
 
     def add_art(self, kind):
-        types = [("SVG files", "*.svg")] if kind == "svg" else ART_TYPES
-        path = filedialog.askopenfilename(title=f"Choose {D.TYPE_LABELS[kind].lower()}", filetypes=types)
+        path = filedialog.askopenfilename(title=f"Choose {D.TYPE_LABELS[kind].lower()}", filetypes=ART_TYPES)
         if not path:
             return
         c = self.design["canvas"]
-        layer = D.new_layer(kind, self.design, src=os.path.abspath(path),
+        layer = D.new_layer(kind, self.design, src=os.path.abspath(path), name=os.path.basename(path),
                             w_in=round(min(c["width_in"], c["height_in"]) * (0.6 if kind == "image" else 0.35), 2))
         if kind == "image":
             s = self.app.settings() or core.Settings()
             layer["settings"].update({f: getattr(s, f) for f in D.LAYER_SETTING_FIELDS
                                       if f not in ("contrast", "brightness", "gamma")})
         self._add(layer)
+
+    def add_vector(self):
+        """A vector file at its real size. If its page is the canvas size, the drawing goes where
+        it sits on the page; otherwise it's centered."""
+        path = filedialog.askopenfilename(title="Choose a vector file", filetypes=VECTOR_TYPES)
+        if not path:
+            return
+        try:
+            doc = V.load(path)
+        except Exception as e:
+            messagebox.showerror("Couldn't open the file", str(e))
+            return
+        if not doc["items"]:
+            messagebox.showinfo("Nothing to add", "No drawable shapes were found in this file.")
+            return
+        c = self.design["canvas"]
+        layer = D.new_layer("svg", self.design, src=os.path.abspath(path))
+        w, h = D.vector_size(layer, doc)
+        if not doc["sized"]:                         # no physical size: fit it like a logo
+            f = min(c["width_in"], c["height_in"]) * 0.35 / max(w, h)
+            w, h = w * f, h * f
+        layer.update(w_in=w, h_in=h, name=os.path.basename(path))
+        same_page = (abs(doc["w_in"] - c["width_in"]) < 0.02 * c["width_in"]
+                     and abs(doc["h_in"] - c["height_in"]) < 0.02 * c["height_in"])
+        if doc["sized"] and same_page:
+            l, t, r, b = D.vector_box(layer, doc)
+            layer.update(x_in=(l + r) / 2, y_in=(t + b) / 2)
+        self._add(layer)
+        msg = f"Added {os.path.basename(path)} at {w * 25.4:.1f} × {h * 25.4:.1f} mm"
+        if w > c["width_in"] + 1e-6 or h > c["height_in"] + 1e-6:
+            msg += " (bigger than the canvas)"
+        self.app.set_status(msg)
 
     def add_simple(self, kind, **kw):
         self._add(D.new_layer(kind, self.design, **kw))
@@ -826,7 +1084,7 @@ class DesignController:
                 look = self.app.materials.get(snap["material"], {}).get("look", ["#ffffff", "#000000"])
                 img = Image.fromarray(np.where(burn, 0, 255).astype(np.uint8))
                 view, fill = ImageOps.colorize(img, black=look[1], white=look[0]), float(burn.mean())
-            cuts = D.all_cut_paths(snap, r, cover)            # red lines on the preview
+            cuts = D.all_vectors(snap, r, cover)              # red / blue lines on the preview
             sizes = {l["id"]: (l["w_in"], l["h_in"]) for l in snap["layers"] if l["type"] in ("text", "arctext")}
             stats = core.raster_stats(burn) if which == "Design" else None   # for the time estimate
             self.app.results.put(("design", which, gen, view, sizes, fill, time.time() - t, cuts, stats))
@@ -845,8 +1103,7 @@ class DesignController:
             return
         self.stale[which] = False
         self.cut_preview[which] = cuts
-        cut_mm = sum(math.dist(p[i], p[(i + 1) % len(p)]) if c or i + 1 < len(p) else 0
-                     for p, c in cuts for i in range(len(p))) * 25.4
+        cut_mm = vectors.path_length_mm(cuts)
         if stats is None:                       # Layout view: keep the last engraving estimate
             stats = app.estimate[0] if app.estimate else None
         app.set_estimate(stats, self.design["dpi"], cut_mm)
@@ -889,12 +1146,13 @@ class DesignController:
         W, H = self.design["canvas"]["width_in"] * dpi, self.design["canvas"]["height_in"] * dpi
         c.create_rectangle(ox, oy, ox + W * s, oy + H * s, outline="#94a3b8", dash=(4, 3))
         k = dpi * s                                   # inches -> screen
-        for pts, closed in self.cut_preview.get(self._shown(), []):
-            flat = [v for x, y in pts for v in (ox + x * k, oy + y * k)]
-            if closed and len(pts) > 2:
-                flat += flat[:2]
-            if len(flat) >= 4:
-                c.create_line(*flat, fill="#ef4444", width=1.5)
+        for kind, paths in (self.cut_preview.get(self._shown()) or {}).items():
+            for pts, closed in paths:
+                flat = [v for x, y in pts for v in (ox + x * k, oy + y * k)]
+                if closed and len(pts) > 2:
+                    flat += flat[:2]
+                if len(flat) >= 4:
+                    c.create_line(*flat, fill=LINE_COLORS[kind], width=1.5)
         if self.drag and self.drag.get("snap"):
             for kind, v in self.drag["snap"]:
                 if kind == "x":

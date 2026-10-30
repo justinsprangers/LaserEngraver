@@ -188,15 +188,16 @@ Shortcuts are ignored while you're typing in a field.
   on every side, so center the two on each other in your laser software.
 - `..._preview.jpg` (if *Also save side-by-side preview JPG* is ticked): adjusted vs. final.
 
-## Design mode (layouts with text, logos and shapes)
+## Design mode (layouts with photos, vector files, text and shapes)
 
 Switch **Photos | Design** at the top left. Design mode lays out several items on one canvas and
-exports a single engraving, so you don't need Inkscape for the layout step.
+exports files your laser software opens directly (engraving image + cut and score lines), so you
+don't need Inkscape to set up a job.
 
 1. **Design** tab: set the canvas size (your material), material, DPI, invert, mirror, and
-   whether to save a cut outline.
-2. **Add** (Layers panel): Photo, Logo / clip art (PNG), SVG, Text, Arc text, Rectangle,
-   Circle / ellipse, Line.
+   which files to export.
+2. **Add** (Layers panel): Photo, Logo / clip art (PNG), Vector file (SVG, PDF, AI, DXF), Text,
+   Arc text, Rectangle, Circle / ellipse, Line.
 3. Arrange on the **Layout** view: it's fast because photos are shown as plain pictures. Switch
    to the **Design** view to see the real engraving; it only renders when you look at it.
    - Drag to move. Edges and centers snap to other items and to the canvas edges and center
@@ -213,34 +214,54 @@ exports a single engraving, so you don't need Inkscape for the layout step.
 4. **Layer** tab: exact position, size and rotation, plus settings for the selected item:
    - Photo: crop (% from each edge). Its style (photo / comic), tone, background removal and
      cut-out fixes are on the Basic / Photo tuning / Comic tuning tabs, separately for every photo.
-   - Logo / SVG: dark threshold, or engrave the light parts instead. Transparent areas let
-     lower layers show through.
+   - Logo: dark threshold, or engrave the light parts instead. Transparent areas let lower
+     layers show through.
+   - Vector file: see [Vector files](#vector-files-svg-pdf-ai-dxf) below.
    - Text: text, font (type to filter), style, size in points, alignment, line spacing,
      outline-only.
    - Arc text: text along a circle, either over the top (reads clockwise) or along the bottom
      (upright). Put a top and a bottom arc at the same position with the same radius for a
      round badge.
    - Shapes: filled or outlined, line width, rounded corners.
-5. **Engrave or cut:** every item has **Output: Engrave / Cut** at the top of the Layer tab.
-   Shapes start as Cut; everything else starts as Engrave. Cut items are drawn as red lines on
-   the canvas and left out of the engraving:
-   - shapes cut along their outline (fill is ignored);
-   - text and arc text cut along the letter outlines;
-   - SVGs cut along their own paths (SVG `<text>` isn't included; convert text to paths in
-     Inkscape first);
-   - logos and photos cut along their traced outline (for photos, the background-removed shape).
+5. **Engrave, score or cut:** every item has **Output: Engrave / Score / Cut** at the top of
+   the Layer tab (vector files choose per color instead). Shapes start as Cut; everything else
+   starts as Engrave. Score is a light line on the surface (blue); Cut goes through (red). Score
+   and cut items are drawn as blue / red lines on the canvas and left out of the engraving:
+   - shapes follow their outline (fill is ignored);
+   - text and arc text follow the letter outlines;
+   - logos and photos follow their traced outline (for photos, the background-removed shape).
+
+   For score / cut items, **Score / cut lines** on the Layer tab offers:
+   - **Weld overlapping shapes**: overlapping letters or shapes become one outline, so the laser
+     doesn't cut through the middle (on by default for text);
+   - **Outer outline only**: just the outside edge, e.g. a cut-out around a logo;
+   - **Offset (mm)**: grows (+) or shrinks (−) the lines, for a margin around text / a logo or
+     for kerf compensation (about half your laser's cut width). Offset and outer outline also
+     weld; open lines (not closed shapes) aren't offset.
 6. **Save engraving** writes:
    - `<name>.png`: the 1-bit engraving (if anything is engraved);
-   - `<name>_cut.svg` and/or `<name>_cut.dxf`: the cut lines, as chosen under **Cut lines
-     file** on the Design tab. They're in millimetres with cut lines in pure red (#FF0000),
-     which Trotec Ruby, xTool, LaserGRBL and LightBurn can map to a cut layer. DXF is the
-     old R12 format for the widest compatibility;
-   - optional `<name>_combined.svg`: the engraving embedded under the cuts, already aligned
-     (works in LightBurn; not tested in Ruby or xTool).
+   - `<name>_cut.svg` / `.dxf` and `<name>_score.svg` / `.dxf`: one vector file per job, as
+     chosen under **Cut / score files** on the Design tab. Millimetres, cut lines pure red
+     (#FF0000), score lines pure blue (#0000FF), as hairlines. DXF is the old R12 format for the
+     widest compatibility (layers CUT, SCORE, FRAME);
+   - optional **all-in-one file** `<name>_combined.svg` / `.pdf`: the engraving image with every
+     score and cut line on top, already lined up.
 
-   **Lining them up:** the PNG is exactly the canvas size, and with **Add alignment frame** on,
-   the cut file has a blue rectangle the size of the canvas. Import both, align the PNG's
-   corner with the blue frame's corner, then delete or disable the frame.
+   **Lining up separate files:** the PNG is exactly the canvas size, and with **Add alignment
+   frame** on, the cut and score files have a green rectangle the size of the canvas. Import
+   them, align the PNG's corner with the green frame's corner, then delete or disable the frame.
+
+   **Which files for which laser program** (from their documentation; not all tested here):
+
+   | Program | Use | Then |
+   |---|---|---|
+   | LightBurn | All-in-one SVG or PDF | Each color comes in as its own layer: set the image layer to Image mode (dithering off / Threshold, line interval = your DPI), blue to score, red to cut. |
+   | Trotec Ruby | All-in-one PDF | Map red to cut and blue to score in the material settings; the image engraves. |
+   | xTool (XCS / xTool Studio) | All-in-one SVG or PDF, or PNG + cut / score SVGs | Each color becomes a layer; SVG lines arrive as Score: set red to Cut. |
+   | LaserGRBL | PNG, then the cut / score SVGs | It runs one job per file: load the PNG (engrave), then use File → Append for each SVG with its own power and speed. Use the frame to line them up. |
+
+   If a program doesn't bring in the image from the all-in-one file, use the PNG + cut / score
+   files instead.
 
    **Cut outline around everything engraved** adds a cut line around the engraved artwork,
    pushed out by the offset. Mirror is applied to the engraving and the cut lines together, so
@@ -254,6 +275,34 @@ exports a single engraving, so you don't need Inkscape for the layout step.
    = 100 lines/cm = 0.1 mm line interval) and turn the software's own dithering off (use a
    plain black-and-white / threshold mode). If the software resamples or re-dithers the
    already-dithered image, you get blotchy, boxy patches.
+
+### Vector files (SVG, PDF, AI, DXF)
+
+**Add → Vector file…** opens SVG, PDF, Adobe Illustrator (.ai, saved PDF-compatible, the
+default) and DXF files.
+
+- **Real size:** the file comes in at the size it was drawn (SVG width/height in mm, in, pt or
+  px at 96 per inch, like Inkscape; Illustrator SVGs at 72 per inch; PDF page size; DXF units).
+  If the file's page is the same size as the canvas, the drawing lands where it sits on the
+  page. **1:1 size** goes back to the file's size; **Canvas = file page** makes the canvas the
+  file's page size, for ready-made cut sheets. A file that states no size (only a viewBox) is
+  scaled to fit like a logo.
+- **What the laser does with each color:** every line color and fill color in the file gets a
+  job: **Engrave**, **Score**, **Cut**, **Blank** (not burned, and hides anything under it, like
+  white parts of a logo) or **Ignore**. Defaults follow the usual laser convention: red lines
+  cut, blue lines score, hairlines (thinner than 0.1 mm) cut, dark fills and thick lines engrave,
+  light colors are blank; every DXF line cuts. A fill color set to Score or Cut follows its
+  outline. Change any of them in the list.
+- **Engraved line width (mm):** width for line colors set to Engrave (0 = as drawn).
+- **Break apart** makes every shape its own layer (move, delete, or set each separately);
+  **Split by color** makes one layer per color. Ctrl+Z undoes either.
+- **Text** inside SVGs is converted with your installed fonts (bold / italic, alignment,
+  multi-line). PDF text and SVG text in fonts you don't have are converted with a stand-in font
+  (the Layer tab says so). DXF text uses ezdxf's fonts.
+- **Not imported** (the Layer tab lists what applies to the file): pictures inside a vector
+  file (add them as Photo layers), clipping masks (the hidden parts come in too), text along a
+  path, old Inkscape flowed text, DXF points. Dashed lines come in solid. Only the first page
+  of a multi-page PDF is used.
 
 **Projects:** **Save** / **Save as…** write a `.lep` project file. It's self-contained (it includes
 copies of every image and all photo fixes), so it still opens if the originals move, or on
@@ -403,9 +452,10 @@ Run `python engrave_core.py -h` for all options.
 | `app_common.py` | Constants shared by the app files. |
 | `selftest.py` | Self-test the build runs on the finished exe. |
 | `engrave_core.py` | All image processing. Change the pipeline here. |
-| `design.py` | Design mode engine: layers, text/arc text/shapes/logos/SVG rendering, compositing, project files. |
-| `design_ui.py` | Design mode screens: layers panel, Design/Layer tabs, drag handles, undo. |
-| `vectors.py` | Cut lines (shapes, letter outlines, SVG paths, traced outlines) and the SVG/DXF writers. |
+| `design.py` | Design mode engine: layers, text/arc text/shapes/logos/vector-file rendering, compositing, export, project files. |
+| `design_ui.py` | Design mode screens: layers panel, Design/Layer tabs, color jobs, drag handles, undo. |
+| `vecfile.py` | Reads vector files (SVG, PDF, AI, DXF) at their real size, with each line / fill color as a group. |
+| `vectors.py` | Score / cut lines (shapes, letter outlines, vector files, traced outlines), weld / offset, and the SVG / DXF / PDF writers. |
 | `shortcuts.py` | Keyboard shortcut list, key matching, and the Shortcuts window. |
 | `ui_kit.py` | Look, DPI scaling and shared widgets: the theme, tooltips, pinned-tab scrolling pages. |
 | `materials.json` | Material profiles. |

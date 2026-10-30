@@ -5,9 +5,13 @@ numpy>=1.24.0
 # Optional but strongly recommended: makes Stucki dithering ~50x faster,
 # which is what keeps the live preview responsive.
 numba>=0.58
-# SVG import in Design mode.
+# Vector files in Design mode: SVG / PDF / AI import and the combined PDF export.
 pymupdf>=1.24
-# Letter outlines for cut text in Design mode.
-fonttools>=4.40# Optional: AI background removal ("Remove background" checkbox).
+# Letter outlines for cut text, and SVG text converted with the installed fonts.
+fonttools>=4.40
+# DXF import in Design mode.
+ezdxf>=1.3
+# Weld, outer outline and offset for score / cut lines; thick engraved lines.
+shapely>=2.0# Optional: AI background removal ("Remove background" checkbox).
 # Downloads a ~170 MB model to %USERPROFILE%\.u2net the first time it's used.
 rembg>=2.0

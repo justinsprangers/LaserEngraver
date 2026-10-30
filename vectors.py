@@ -1,15 +1,18 @@
 """
-vectors.py: cut lines for Design mode, and SVG / DXF writers.
+vectors.py: cut and score lines for Design mode, and the SVG / DXF / PDF writers.
 
-Any layer can be set to Cut instead of Engrave. Its cut lines are polylines in canvas inches:
+Any layer can be engraved (raster), scored (a light vector line) or cut. Its lines are
+polylines in canvas inches:
     shapes      their outline (rectangle with rounded corners, ellipse, line)
     text        letter outlines (fontTools), laid out the same way for preview and export
     arc text    letter outlines placed along the circle
-    SVG         the SVG's own paths (PyMuPDF)
+    vector file each color's own job (vecfile.py): line colors along their path, fill colors
+                along their outline
     logo/photo  the traced outline of the artwork / cut-out
-Cut items are left out of the engraving PNG. The writers produce files in millimetres with
-cut lines in pure red (#FF0000) and an optional blue canvas frame for lining the PNG up in
-software that doesn't keep file positions (Trotec Ruby, xTool, LaserGRBL, LightBurn...).
+Optional per layer: weld overlapping shapes, keep only the outer outline, offset (shapely).
+Vector items are left out of the engraving PNG. The writers produce files in millimetres with
+cut lines in pure red (#FF0000), score lines in pure blue (#0000FF) and an optional green canvas
+frame for lining the PNG up in software that doesn't keep file positions.
 """
 
 import base64
@@ -19,8 +22,12 @@ import cv2
 import numpy as np
 
 CUT_RGB = "#ff0000"
-FRAME_RGB = "#0000ff"
-CURVE_STEPS = 8                      # line segments per font / SVG curve
+SCORE_RGB = "#0000ff"
+FRAME_RGB = "#00ff00"
+KINDS = ("score", "cut")              # file order: scores before cuts (laser order)
+COLORS = {"cut": CUT_RGB, "score": SCORE_RGB}
+TOL_IN = 0.0008                       # curve flattening tolerance for vector output (~0.02 mm)
+HAIRLINE_MM = 0.0254                  # line width in written files (0.001 in "hairline")
 
 
 # ------------------------------------------------------------------------------
@@ -44,11 +51,12 @@ def _bbox(polys):
     return (min(xs), min(ys), max(xs), max(ys)) if xs else (0, 0, 0, 0)
 
 
-def _center(polys):
-    """Shifts local polylines so their bounding box is centered on 0,0. Returns (polys, w, h)."""
-    l, t, r, b = _bbox(polys)
+def _center_groups(groups):
+    """Shifts groups of local polylines so their bounding box is centered on 0,0.
+    Returns (groups, w, h)."""
+    l, t, r, b = _bbox([p for g, _ in groups for p in g])
     mx, my = (l + r) / 2, (t + b) / 2
-    return [([(x - mx, y - my) for x, y in pts], c) for pts, c in polys], r - l, b - t
+    return [([([(x - mx, y - my) for x, y in pts], c) for pts, c in g], eo) for g, eo in groups], r - l, b - t
 
 
 def _ellipse(w, h, n=None):
@@ -56,17 +64,112 @@ def _ellipse(w, h, n=None):
     return [(w / 2 * math.cos(2 * math.pi * i / n), h / 2 * math.sin(2 * math.pi * i / n)) for i in range(n)]
 
 
+def _arc_steps(r):
+    """Segments per quarter circle so the line stays within TOL_IN of the arc."""
+    if r <= TOL_IN:
+        return 1
+    return max(4, math.ceil((math.pi / 2) / (2 * math.acos(max(-1.0, 1 - TOL_IN / r)))))
+
+
 def _rounded_rect(w, h, r):
     r = max(0.0, min(r, w / 2, h / 2))
     if r <= 0:
         return [(-w / 2, -h / 2), (w / 2, -h / 2), (w / 2, h / 2), (-w / 2, h / 2)]
-    pts, n = [], 12
+    pts, n = [], _arc_steps(r)
     for (cx, cy, a0) in ((w / 2 - r, -h / 2 + r, -90), (w / 2 - r, h / 2 - r, 0),
                          (-w / 2 + r, h / 2 - r, 90), (-w / 2 + r, -h / 2 + r, 180)):
         for i in range(n + 1):
             a = math.radians(a0 + 90 * i / n)
             pts.append((cx + r * math.cos(a), cy + r * math.sin(a)))
     return pts
+
+
+def path_length_mm(vecs):
+    """Total length of every vector line (cut + score), mm."""
+    return sum(math.dist(p[i], p[(i + 1) % len(p)]) if c or i + 1 < len(p) else 0
+               for paths in vecs.values() for p, c in paths for i in range(len(p))) * 25.4
+
+
+# ------------------------------------------------------------------------------
+# Weld / outer outline / offset (shapely)
+# ------------------------------------------------------------------------------
+
+def _group_area(rings, evenodd):
+    """One shape's filled area from its closed rings. Even-odd: rings alternate filled/hole.
+    Nonzero (fonts, most drawings): rings turning the same way as the biggest one fill, the
+    others cut holes."""
+    from shapely.geometry import Polygon
+    from shapely.validation import make_valid
+    from shapely.ops import unary_union
+    polys = []
+    for pts in rings:
+        if len(pts) < 3:
+            continue
+        p = Polygon(pts)
+        if not p.is_valid:
+            p = make_valid(p)
+        if not p.is_empty and p.area > 1e-12:
+            polys.append((p, _signed(pts)))
+    if not polys:
+        return None
+    if evenodd:
+        out = polys[0][0]
+        for p, _ in polys[1:]:
+            out = out.symmetric_difference(p)
+        return out
+    ref = max(polys, key=lambda q: abs(q[1]))[1] > 0
+    pos = unary_union([p for p, s in polys if (s > 0) == ref])
+    neg = [p for p, s in polys if (s > 0) != ref]
+    return pos.difference(unary_union(neg)) if neg else pos
+
+
+def _signed(pts):
+    return 0.5 * sum(pts[i][0] * pts[i - 1][1] - pts[i - 1][0] * pts[i][1] for i in range(len(pts)))
+
+
+def polygons(geom):
+    """The Polygons inside any shapely geometry (Polygon, MultiPolygon, collection)."""
+    from shapely.geometry import Polygon, MultiPolygon, GeometryCollection
+    if isinstance(geom, Polygon):
+        return [geom]
+    if isinstance(geom, (MultiPolygon, GeometryCollection)):
+        return [p for g in geom.geoms for p in polygons(g)]
+    return []
+
+
+def shape_ops(groups, weld=False, outer=False, offset_in=0.0):
+    """groups = [(polylines, evenodd), ...], one per shape (letter, drawing item...).
+    Returns plain polylines. Weld merges overlapping shapes into one outline; outer keeps only
+    the outside edge (no holes); offset grows (+) or shrinks (-) the shapes. Outer and offset
+    also weld. Open lines pass through unchanged."""
+    flat = [p for g, _ in groups for p in g]
+    if not (weld or outer or offset_in):
+        return flat
+    from shapely.ops import unary_union
+    areas, opens = [], []
+    for g, evenodd in groups:
+        rings = [pts for pts, c in g if c and len(pts) >= 3]
+        opens += [(pts, c) for pts, c in g if not c or len(pts) < 3]
+        a = _group_area(rings, evenodd)
+        if a is not None and not a.is_empty:
+            areas.append(a)
+    if not areas:
+        return flat
+    merged = unary_union(areas)
+    if offset_in:
+        merged = merged.buffer(offset_in, quad_segs=max(8, _arc_steps(abs(offset_in))), join_style="round")
+    out = []
+    for poly in polygons(merged):
+        out.append((list(poly.exterior.coords)[:-1], True))
+        if not outer:
+            out += [(list(r.coords)[:-1], True) for r in poly.interiors]
+    return out + opens
+
+
+def layer_ops(layer):
+    """The layer's weld / outer / offset choices as shape_ops() keyword arguments."""
+    return {"weld": bool(layer.get("weld")), "outer": bool(layer.get("outer")),
+            "offset_in": float(layer.get("offset_mm", 0.0) or 0.0) / 25.4}
 
 
 # ------------------------------------------------------------------------------
@@ -94,11 +197,18 @@ def _ttfont(path, family, style):
     return _TT[key]
 
 
-class _FlattenPen:
-    """fontTools pen that turns glyph outlines into polylines (font units)."""
+def _cubic_steps(p0, p1, p2, p3, tol):
+    m = max(math.hypot(p0[0] - 2 * p1[0] + p2[0], p0[1] - 2 * p1[1] + p2[1]),
+            math.hypot(p1[0] - 2 * p2[0] + p3[0], p1[1] - 2 * p2[1] + p3[1]))
+    return min(500, max(1, math.ceil(math.sqrt(0.75 * m / tol))))      # Wang's formula
 
-    def __init__(self):
-        self.polys, self.cur = [], []
+
+class _FlattenPen:
+    """fontTools pen that turns glyph outlines into polylines (font units), curves split
+    until they're within `tol` font units of the real curve."""
+
+    def __init__(self, tol):
+        self.polys, self.cur, self.tol = [], [], tol
 
     def moveTo(self, p):
         self._close()
@@ -112,8 +222,9 @@ class _FlattenPen:
         ctrl = [start] + list(pts)
         while len(ctrl) >= 4:
             p0, p1, p2, p3 = ctrl[:4]
-            for i in range(1, CURVE_STEPS + 1):
-                t = i / CURVE_STEPS
+            n = _cubic_steps(p0, p1, p2, p3, self.tol)
+            for i in range(1, n + 1):
+                t = i / n
                 u = 1 - t
                 self.cur.append((u ** 3 * p0[0] + 3 * u * u * t * p1[0] + 3 * u * t * t * p2[0] + t ** 3 * p3[0],
                                  u ** 3 * p0[1] + 3 * u * u * t * p1[1] + 3 * u * t * t * p2[1] + t ** 3 * p3[1]))
@@ -127,8 +238,10 @@ class _FlattenPen:
         prev = start
         for i, c in enumerate(offs):
             nxt = end if i == len(offs) - 1 else ((c[0] + offs[i + 1][0]) / 2, (c[1] + offs[i + 1][1]) / 2)
-            for k in range(1, CURVE_STEPS + 1):
-                t = k / CURVE_STEPS
+            dd = math.hypot(prev[0] - 2 * c[0] + nxt[0], prev[1] - 2 * c[1] + nxt[1])
+            n = min(500, max(1, math.ceil(math.sqrt(dd / (4 * self.tol)))))
+            for k in range(1, n + 1):
+                t = k / n
                 u = 1 - t
                 self.cur.append((u * u * prev[0] + 2 * u * t * c[0] + t * t * nxt[0],
                                  u * u * prev[1] + 2 * u * t * c[1] + t * t * nxt[1]))
@@ -160,19 +273,32 @@ def _glyphs(layer):
     return font, scale, font.getGlyphSet(), font.getBestCmap(), font["hmtx"], hhea
 
 
-def _glyph_polys(gs, name):
+_GLYPHS = {}
+
+
+def _glyph_polys(gs, name, tol=1.0, font=None):
+    """A glyph's outline polylines (font units). Pass the TTFont to cache the result."""
+    key = (id(font), name, round(tol, 4)) if font is not None else None
+    if key in _GLYPHS:
+        return _GLYPHS[key]
     from fontTools.pens.recordingPen import DecomposingRecordingPen
     rec = DecomposingRecordingPen(gs)            # resolves composite glyphs (é, Å, ...)
     gs[name].draw(rec)
-    pen = _FlattenPen()
+    pen = _FlattenPen(tol)
     rec.replay(pen)
     pen._close()
+    if key:
+        if len(_GLYPHS) > 5000:
+            _GLYPHS.clear()
+        _GLYPHS[key] = pen.polys
     return pen.polys
 
 
 def text_paths(layer):
-    """Letter outlines of a text layer, local inches centered on 0,0. Returns (polys, w, h)."""
+    """Letter outlines of a text layer, local inches centered on 0,0, one group per letter.
+    Returns (groups, w, h)."""
     font, k, gs, cmap, hmtx, hhea = _glyphs(layer)
+    tol = TOL_IN / k
     track = layer.get("tracking", 0.0) * layer["size_pt"] / 72
     line_h = (hhea.ascent - hhea.descent + hhea.lineGap) * k * layer.get("line_spacing", 1.1)
     lines = (layer["text"] or " ").split("\n")
@@ -186,18 +312,22 @@ def text_paths(layer):
         widths.append(max(0.0, x - track))
         laid.append((glyphs, row * line_h))
     full = max(widths) if widths else 0
-    polys = []
+    groups = []
     for (glyphs, y0), w in zip(laid, widths):
         dx = {"left": 0, "right": full - w}.get(layer.get("align", "center"), (full - w) / 2)
         for name, x in glyphs:
-            for pts, c in _glyph_polys(gs, name):
-                polys.append(([(dx + x + px * k, y0 - py * k) for px, py in pts], c))   # font y is up
-    return _center(polys) if polys else ([], 0, 0)
+            g = [([(dx + x + px * k, y0 - py * k) for px, py in pts], c)      # font y is up
+                 for pts, c in _glyph_polys(gs, name, tol, font)]
+            if g:
+                groups.append((g, False))
+    return _center_groups(groups) if groups else ([], 0, 0)
 
 
 def arctext_paths(layer):
-    """Letter outlines along a circle, local inches centered on the circle's center."""
+    """Letter outlines along a circle, local inches centered on the circle's center, one group
+    per letter. Returns (groups, w, h)."""
     font, k, gs, cmap, hmtx, hhea = _glyphs(layer)
+    tol = TOL_IN / k
     track = layer.get("tracking", 0.0) * layer["size_pt"] / 72
     r = max(0.01, layer["radius_in"])
     names = [cmap.get(ord(ch), ".notdef") for ch in (layer["text"] or " ")]
@@ -205,7 +335,7 @@ def arctext_paths(layer):
     span = sum(adv) / r
     top = layer.get("arc", "top") == "top"
     theta0 = -math.pi / 2 - span / 2 if top else math.pi / 2 + span / 2
-    polys, cum = [], 0.0
+    groups, cum = [], 0.0
     for name, a in zip(names, adv):
         mid = (cum + a / 2) / r
         th = theta0 + mid if top else theta0 - mid
@@ -214,66 +344,47 @@ def arctext_paths(layer):
         ct, st = math.cos(turn), math.sin(turn)
         bx, by = r * math.cos(th), r * math.sin(th)          # baseline point on the circle
         half = (a - track) / 2
-        for pts, c in _glyph_polys(gs, name):
+        g = []
+        for pts, c in _glyph_polys(gs, name, tol, font):
             out = []
             for px, py in pts:
                 lx, ly = px * k - half, -py * k                # glyph coords, baseline-centered
                 out.append((bx + lx * ct - ly * st, by + lx * st + ly * ct))
-            polys.append((out, c))
+            g.append((out, c))
+        if g:
+            groups.append((g, False))
     R = r + (hhea.ascent - hhea.descent) * k
-    return polys, 2 * R, 2 * R
+    return groups, 2 * R, 2 * R
 
 
 # ------------------------------------------------------------------------------
-# Per-layer cut paths
+# Per-layer vector lines
 # ------------------------------------------------------------------------------
 
-def svg_paths(layer):
-    """The SVG's own drawing paths, scaled to the layer size, local inches centered on 0,0."""
-    import pymupdf
-    page = pymupdf.open(layer["src"])[0]
-    pw, ph = page.rect.width, page.rect.height
-    sx, sy = layer["w_in"] / max(pw, 1e-6), layer["h_in"] / max(ph, 1e-6)
-    tf = lambda p: (p.x * sx - layer["w_in"] / 2, p.y * sy - layer["h_in"] / 2)
-    polys = []
-    for d in page.get_drawings():
-        cur = []
-        for item in d["items"]:
-            op = item[0]
-            if op == "l":
-                a, b = tf(item[1]), tf(item[2])
-                if not cur or cur[-1] != a:
-                    if len(cur) > 1:
-                        polys.append((cur, False))
-                    cur = [a]
-                cur.append(b)
-            elif op == "c":
-                p0, p1, p2, p3 = (tf(p) for p in item[1:5])
-                if not cur or cur[-1] != p0:
-                    if len(cur) > 1:
-                        polys.append((cur, False))
-                    cur = [p0]
-                for i in range(1, CURVE_STEPS + 1):
-                    t = i / CURVE_STEPS
-                    u = 1 - t
-                    cur.append((u ** 3 * p0[0] + 3 * u * u * t * p1[0] + 3 * u * t * t * p2[0] + t ** 3 * p3[0],
-                                u ** 3 * p0[1] + 3 * u * u * t * p1[1] + 3 * u * t * t * p2[1] + t ** 3 * p3[1]))
-            elif op == "re":
-                rc = item[1]
-                if len(cur) > 1:
-                    polys.append((cur, False))
-                cur = []
-                polys.append(([tf(rc.tl), tf(rc.tr), tf(rc.br), tf(rc.bl)], True))
-            elif op == "qu":
-                q = item[1]
-                if len(cur) > 1:
-                    polys.append((cur, False))
-                cur = []
-                polys.append(([tf(q.ul), tf(q.ur), tf(q.lr), tf(q.ll)], True))
-        if len(cur) > 1:
-            closed = d.get("closePath") or cur[0] == cur[-1]
-            polys.append((cur, bool(closed)))
-    return polys
+def file_vectors(layer):
+    """A vector-file layer's cut and score lines: {"cut": groups, "score": groups}, local
+    inches centered on 0,0 (groups as in shape_ops). Fill colors give their outlines, line
+    colors their paths."""
+    import design as D
+    import vecfile as V
+    doc = V.load(layer["src"])
+    jobs = D.vector_jobs(layer, doc)
+    l, t, r, b = D.vector_box(layer, doc)
+    sx, sy = layer["w_in"] / (r - l), layer["h_in"] / (b - t)
+    cx, cy = (l + r) / 2, (t + b) / 2
+    tol = TOL_IN / max(sx, sy, 1e-9)
+    out = {"cut": [], "score": []}
+    for i in V.part_ids(doc, layer.get("parts")):
+        it = doc["items"][i]
+        for key in V.item_keys(it):
+            job = jobs.get(key)
+            if job not in out:
+                continue
+            fill = key.startswith("f:")
+            g = [([((x - cx) * sx, (y - cy) * sy) for x, y in V.flatten(sub, tol)], fill or sub[2])
+                 for sub in it["subs"]]
+            out[job].append((g, it["evenodd"]))
+    return out
 
 
 def mask_paths(cover, x0, y0, dpi, holes=True):
@@ -290,30 +401,40 @@ def mask_paths(cover, x0, y0, dpi, holes=True):
     return out
 
 
-def layer_paths(layer, renderer, design):
-    """Cut lines for one layer in canvas inches. Text/arc text also update the layer's size."""
+def layer_vectors(layer, renderer, design):
+    """{"cut": polylines, "score": polylines} for one layer, canvas inches (kinds with no lines
+    are left out). Text/arc text also update the layer's size."""
     t = layer["type"]
+    ops = layer_ops(layer)
+    if t == "svg":
+        out = {}
+        for kind, groups in file_vectors(layer).items():
+            if groups:
+                out[kind] = _place(shape_ops(groups, **ops), layer)
+        return out
+    op = layer.get("op", "engrave")
+    if op not in COLORS:
+        return {}
     if t == "shape":
         w, h, kind = layer["w_in"], layer["h_in"], layer.get("shape", "rect")
         if kind == "line":
-            local = [([(-w / 2, 0), (w / 2, 0)], False)]
+            groups = [([([(-w / 2, 0), (w / 2, 0)], False)], False)]
         elif kind == "ellipse":
-            local = [(_ellipse(w, h), True)]
+            groups = [([(_ellipse(w, h), True)], False)]
         else:
-            local = [(_rounded_rect(w, h, layer.get("corner_in", 0.0)), True)]
-        return _place(local, layer)
+            groups = [([(_rounded_rect(w, h, layer.get("corner_in", 0.0)), True)], False)]
+        return {op: _place(shape_ops(groups, **ops), layer)}
     if t in ("text", "arctext"):
-        local, w, h = text_paths(layer) if t == "text" else arctext_paths(layer)
+        groups, w, h = text_paths(layer) if t == "text" else arctext_paths(layer)
         layer["w_in"], layer["h_in"] = max(w, 0.01), max(h, 0.01)
-        return _place(local, layer)
-    if t == "svg":
-        return _place(svg_paths(layer), layer)
-    # logo / photo: trace the artwork's outline from its rendered mask
+        return {op: _place(shape_ops(groups, **ops), layer)}
+    # logo / photo: trace the artwork's outline from its rendered mask (already placed)
     _, cover = renderer.layer_masks(layer, design)
     dpi = renderer.dpi(design)
     h, w = cover.shape
     x0, y0 = round(layer["x_in"] * dpi - w / 2), round(layer["y_in"] * dpi - h / 2)
-    return mask_paths(cover, x0, y0, dpi, holes=(t == "logo"))
+    rings = mask_paths(cover, x0, y0, dpi, holes=(t == "logo"))
+    return {op: shape_ops([(rings, True)], **ops)}
 
 
 def outline_paths(cover, dpi, offset_in):
@@ -335,7 +456,7 @@ def outline_paths(cover, dpi, offset_in):
 
 
 # ------------------------------------------------------------------------------
-# Writers (millimetres; red cut lines; optional blue frame = the canvas)
+# Writers (millimetres; red cut lines, blue score lines; optional green frame = the canvas)
 # ------------------------------------------------------------------------------
 
 def _mm(paths, design):
@@ -345,34 +466,44 @@ def _mm(paths, design):
     return [([(((W - x) if mir else x) * 25.4, y * 25.4) for x, y in pts], c) for pts, c in paths]
 
 
-def write_svg(paths, design, out_path, frame=False, png_path=None):
+def write_svg(vecs, design, out_path, frame=False, png_path=None):
+    """vecs = {"cut": polylines, "score": polylines}. With png_path, the engraving image is
+    embedded underneath (the combined file)."""
     W, H = design["canvas"]["width_in"] * 25.4, design["canvas"]["height_in"] * 25.4
+    sw = HAIRLINE_MM
     parts = [f'<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" '
              f'width="{W:.3f}mm" height="{H:.3f}mm" viewBox="0 0 {W:.3f} {H:.3f}">']
-    if png_path:                                 # combined file: engraving image under the cuts
+    if png_path:                                 # combined file: engraving image under the lines
         with open(png_path, "rb") as f:
             data = base64.b64encode(f.read()).decode()
-        parts.append(f'  <image x="0" y="0" width="{W:.3f}" height="{H:.3f}" preserveAspectRatio="none" '
-                     f'xlink:href="data:image/png;base64,{data}" href="data:image/png;base64,{data}"/>')
+        parts.append(f'  <image id="engrave" x="0" y="0" width="{W:.3f}" height="{H:.3f}" '
+                     f'preserveAspectRatio="none" xlink:href="data:image/png;base64,{data}" '
+                     f'href="data:image/png;base64,{data}"/>')
     if frame:
-        parts.append(f'  <rect x="0" y="0" width="{W:.3f}" height="{H:.3f}" fill="none" '
-                     f'stroke="{FRAME_RGB}" stroke-width="0.1"/>')
-    for pts, closed in _mm(paths, design):
-        d = "M " + " L ".join(f"{x:.3f},{y:.3f}" for x, y in pts) + (" Z" if closed else "")
-        parts.append(f'  <path d="{d}" fill="none" stroke="{CUT_RGB}" stroke-width="0.1"/>')
+        parts.append(f'  <rect id="frame" x="0" y="0" width="{W:.3f}" height="{H:.3f}" fill="none" '
+                     f'stroke="{FRAME_RGB}" stroke-width="{sw}"/>')
+    for kind in KINDS:
+        paths = vecs.get(kind) or []
+        if not paths:
+            continue
+        parts.append(f'  <g id="{kind}" fill="none" stroke="{COLORS[kind]}" stroke-width="{sw}">')
+        for pts, closed in _mm(paths, design):
+            d = "M " + " L ".join(f"{x:.4f},{y:.4f}" for x, y in pts) + (" Z" if closed else "")
+            parts.append(f'    <path d="{d}"/>')
+        parts.append("  </g>")
     parts.append("</svg>")
     with open(out_path, "w", encoding="utf-8") as f:
         f.write("\n".join(parts) + "\n")
 
 
-def write_dxf(paths, design, out_path, frame=False):
-    """DXF R12 (the most widely readable version): POLYLINEs in mm, Y up. Red = cut layer,
-    blue = FRAME layer."""
+def write_dxf(vecs, design, out_path, frame=False):
+    """DXF R12 (the most widely readable version): POLYLINEs in mm, Y up. Layers CUT (red),
+    SCORE (blue) and FRAME (green)."""
     H = design["canvas"]["height_in"] * 25.4
     out = ["0", "SECTION", "2", "HEADER", "9", "$ACADVER", "1", "AC1009",
            "9", "$INSUNITS", "70", "4", "0", "ENDSEC",
-           "0", "SECTION", "2", "TABLES", "0", "TABLE", "2", "LAYER", "70", "2"]
-    for name, color in (("CUT", 1), ("FRAME", 5)):
+           "0", "SECTION", "2", "TABLES", "0", "TABLE", "2", "LAYER", "70", "3"]
+    for name, color in (("CUT", 1), ("SCORE", 5), ("FRAME", 3)):
         out += ["0", "LAYER", "2", name, "70", "0", "62", str(color), "6", "CONTINUOUS"]
     out += ["0", "ENDTAB", "0", "ENDSEC", "0", "SECTION", "2", "ENTITIES"]
 
@@ -385,9 +516,37 @@ def write_dxf(paths, design, out_path, frame=False):
 
     if frame:
         W = design["canvas"]["width_in"] * 25.4
-        poly([(0, 0), (W, 0), (W, H), (0, H)], True, "FRAME", 5)
-    for pts, closed in _mm(paths, design):
-        poly(pts, closed, "CUT", 1)
+        poly([(0, 0), (W, 0), (W, H), (0, H)], True, "FRAME", 3)
+    for kind, (layer, color) in (("score", ("SCORE", 5)), ("cut", ("CUT", 1))):
+        for pts, closed in _mm(vecs.get(kind) or [], design):
+            poly(pts, closed, layer, color)
     out += ["0", "ENDSEC", "0", "EOF"]
     with open(out_path, "w", encoding="ascii") as f:
         f.write("\n".join(out) + "\n")
+
+
+def write_pdf(vecs, design, out_path, png_path=None):
+    """One PDF page the size of the canvas: the engraving image (if any) with the score and cut
+    lines on top as hairlines, all already lined up (Trotec Ruby reads PDF natively)."""
+    import pymupdf
+    W, H = design["canvas"]["width_in"] * 72, design["canvas"]["height_in"] * 72
+    doc = pymupdf.open()
+    page = doc.new_page(width=W, height=H)
+    if png_path:
+        page.insert_image(page.rect, filename=png_path, keep_proportion=False)
+    k = 72 / 25.4
+    width = HAIRLINE_MM * k
+    for kind in KINDS:
+        color = tuple(int(COLORS[kind][i:i + 2], 16) / 255 for i in (1, 3, 5))
+        paths = _mm(vecs.get(kind) or [], design)
+        if not paths:
+            continue
+        shape = page.new_shape()
+        for pts, closed in paths:
+            if len(pts) < 2:
+                continue
+            shape.draw_polyline([pymupdf.Point(x * k, y * k) for x, y in pts])
+            shape.finish(color=color, width=width, closePath=closed, fill=None)
+        shape.commit()
+    doc.save(out_path, garbage=3, deflate=True)
+    doc.close()
