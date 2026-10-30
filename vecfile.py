@@ -480,24 +480,39 @@ def _fix_for_mupdf(root):
     """Rewrites SVG that MuPDF misreads into a form it reads the way browsers / Inkscape draw it
     (and like _load_svg_plain): fill-rule / opacities / stroke-width inside style="" (ignored)
     -> attributes; stroke-width units (dropped) -> px; currentColor and visibility (ignored) ->
-    resolved; nested <svg> x/y (ignored) -> a translate; <use> width/height on a <symbol>
-    (ignored) -> a sized nested <svg> copy; rounded rects (corners drawn off a true circle) ->
-    paths."""
+    resolved; nested <svg> x/y (ignored) -> a translate; <use> of a <symbol> with a viewBox
+    (MuPDF ignores the size, and doesn't scale an unsized one to 100%) -> a sized nested <svg>
+    copy; rounded rects (corners drawn off a true circle) -> paths."""
     import copy
     ids = {e.get("id"): e for e in root.iter() if e.get("id")}
     svg = lambda tag: f"{{{SVG_NS}}}{tag}"
     for _ in range(10):                                   # symbols may use other symbols
         parent = {c: p for p in root.iter() for c in p}
         changed = False
+
+        def viewport_of(el):                              # the nearest <svg>'s size, user units
+            chain, e = [], parent.get(el)
+            while e is not None:
+                tag = _local(e.tag)
+                if tag == "symbol":
+                    return None                           # not drawn until a <use> copies it
+                if tag == "svg":
+                    chain.append(e)
+                e = parent.get(e)
+            vp = (300.0, 150.0)
+            for e in reversed(chain):
+                vp = _viewport_size(e, vp)
+            return vp
+
         for use in [e for e in root.iter() if _local(e.tag) == "use"]:
             href = use.get(f"{{{XLINK_NS}}}href") or use.get("href") or ""
             ref = ids.get(href[1:]) if href.startswith("#") else None
             box = [float(v) for v in re.split(r"[\s,]+", ref.get("viewBox", "").strip()) if v] \
                 if ref is not None and _local(ref.tag) == "symbol" else []
-            if len(box) != 4 or (use.get("width") is None and use.get("height") is None) or use not in parent:
+            vp = viewport_of(use) if len(box) == 4 and use in parent else None
+            if vp is None:
                 continue
-            w = _length(use.get("width")) or _length(ref.get("width")) or box[2]
-            h = _length(use.get("height")) or _length(ref.get("height")) or box[3]
+            w, h = _symbol_size(use, ref, vp)
             g = ET.Element(svg("g"), {k: v for k, v in use.attrib.items() if k not in
                                       ("x", "y", "width", "height", "href", f"{{{XLINK_NS}}}href")})
             g.set("transform", f"{use.get('transform') or ''} translate({_length(use.get('x')) or 0.0:g},"
@@ -575,6 +590,33 @@ def _fix_for_mupdf(root):
     for el in hidden_uses:
         if el in parent:
             parent[el].remove(el)
+
+
+def _len_pct(v, ref):
+    """Length in user units; percentages of `ref`."""
+    v = (v or "").strip()
+    if v.endswith("%"):
+        try:
+            return float(v[:-1]) / 100 * ref
+        except ValueError:
+            return None
+    return _length(v)
+
+
+def _viewport_size(el, outer):
+    """(w, h) user units inside an <svg> element: its viewBox, else its width/height (percent
+    of / default to the outer viewport)."""
+    box = [float(v) for v in re.split(r"[\s,]+", el.get("viewBox", "").strip()) if v]
+    if len(box) == 4 and box[2] > 0 and box[3] > 0:
+        return box[2], box[3]
+    return (_len_pct(el.get("width"), outer[0]) or outer[0], _len_pct(el.get("height"), outer[1]) or outer[1])
+
+
+def _symbol_size(use, ref, vp):
+    """Viewport of a <use>d <symbol>: the use's width/height, else the symbol's, else 100% of
+    the viewport around the use (SVG 2; browsers and Inkscape draw it that way)."""
+    return (_len_pct(use.get("width"), vp[0]) or _len_pct(ref.get("width"), vp[0]) or vp[0],
+            _len_pct(use.get("height"), vp[1]) or _len_pct(ref.get("height"), vp[1]) or vp[1])
 
 
 def _subs_d(subs):
@@ -990,7 +1032,7 @@ def _load_svg_plain(raw):
                       "cap": caps.get((st.get("stroke-linecap") or "butt").strip(), 0),
                       "join": joins.get((st.get("stroke-linejoin") or "miter").strip(), 0)})
 
-    def walk(el, m, inherited, depth=0):
+    def walk(el, m, inherited, vp, depth=0):
         if depth > 50 or not isinstance(el.tag, str) or not el.tag.startswith(f"{{{SVG_NS}}}"):
             return
         tag = _local(el.tag)
@@ -1000,7 +1042,7 @@ def _load_svg_plain(raw):
         m = _mat_mul(m, _transform(el.get("transform")))
         if tag in ("g", "a", "switch"):
             for c in el:
-                walk(c, m, st, depth + 1)
+                walk(c, m, st, vp, depth + 1)
         elif tag == "svg":                                    # nested viewport
             x, y = _length(el.get("x")) or 0.0, _length(el.get("y")) or 0.0
             box = [float(v) for v in re.split(r"[\s,]+", el.get("viewBox", "").strip()) if v]
@@ -1009,8 +1051,9 @@ def _load_svg_plain(raw):
                 m = _mat_mul(m, _viewport(box, x, y, w or box[2], h or box[3], el.get("preserveAspectRatio")))
             else:
                 m = _mat_mul(m, (1, 0, 0, 1, x, y))
+            vp = _viewport_size(el, vp)
             for c in el:
-                walk(c, m, st, depth + 1)
+                walk(c, m, st, vp, depth + 1)
         elif tag == "use":
             href = el.get(f"{{{XLINK_NS}}}href") or el.get("href") or ""
             ref = ids.get(href[1:]) if href.startswith("#") else None
@@ -1021,13 +1064,13 @@ def _load_svg_plain(raw):
                 rst = style_of(ref, st)
                 box = [float(v) for v in re.split(r"[\s,]+", ref.get("viewBox", "").strip()) if v]
                 if len(box) == 4:
-                    w = _length(el.get("width")) or _length(ref.get("width")) or box[2]
-                    h = _length(el.get("height")) or _length(ref.get("height")) or box[3]
+                    w, h = _symbol_size(el, ref, vp)
                     m = _mat_mul(m, _viewport(box, 0, 0, w, h, ref.get("preserveAspectRatio")))
+                    vp = (box[2], box[3])
                 for c in ref:
-                    walk(c, m, rst, depth + 1)
+                    walk(c, m, rst, vp, depth + 1)
             else:
-                walk(ref, m, st, depth + 1)
+                walk(ref, m, st, vp, depth + 1)
         elif tag in ("path", "rect", "circle", "ellipse", "line", "polyline", "polygon"):
             shape(el, tag, m, st)
         elif tag in ("text", "marker") or (tag not in _NOT_DRAWN and tag != "stop"):
@@ -1036,7 +1079,7 @@ def _load_svg_plain(raw):
 
     root_style = style_of(root, {"_opacity": 1.0})
     for c in root:
-        walk(c, m0, root_style)
+        walk(c, m0, root_style, (vb[2], vb[3]) if len(vb) == 4 else (w_in * 96, h_in * 96))
     if "text" in skipped:
         notes.append("Some text couldn't be converted to outlines and was left out.")
     if "marker" in skipped or any(_local(e.tag) == "marker" for e in root.iter()):

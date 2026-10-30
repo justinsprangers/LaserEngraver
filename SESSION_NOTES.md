@@ -27,6 +27,7 @@
 - JPEG photos aren't pixel-identical between browser and desktop (libjpeg 9 vs libjpeg-turbo); PNGs are. Affects Photos mode too (found 2026-10-29).
 
 ## Log
+- 2026-10-30: Unsized `<use>` of a `<symbol>` now fills 100% of its viewport (desktop + web), like Inkscape
 - 2026-10-30: Desktop SVG: patch what MuPDF misreads (fill-rule/opacity in style, units, currentColor, visibility, nested svg, symbol sizes, rounded rects)
 - 2026-10-30: Web Design mode phase 4: SVG without MuPDF (vecfile._load_svg_plain), DXF via ezdxf wheel, vector panel
 - 2026-10-30: Web Design mode phase 3: export, .lep open/save, IndexedDB autosave, plain PDF writer, full-DPI zoom detail, size warning

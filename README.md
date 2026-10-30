@@ -326,7 +326,7 @@ default) and DXF files.
   (the Layer tab says so). DXF text uses ezdxf's fonts.
 - **SVG details** are read the way Inkscape and browsers draw them: even-odd fill rules,
   invisible (fully transparent) fills and lines, line widths in pt / mm, `currentColor`, hidden
-  items, nested drawings, resized symbols and rounded-rectangle corners. (The desktop app
+  items, nested drawings, symbols (with or without a size) and rounded-rectangle corners. (The desktop app
   rewrites these before PyMuPDF reads the file, because PyMuPDF misreads them; the web version
   has its own reader.) Gradients come in as one solid color: black on the desktop, the first
   gradient color on the web.
