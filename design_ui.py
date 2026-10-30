@@ -67,6 +67,7 @@ class DesignController:
         self.fields = {}
         self.photo_snapshot = None    # photo-mode settings, restored when leaving Design mode
         self._saved_scale_from = "corner"
+        self.draw_kind = None         # "rect" / "ellipse" / "line" while waiting to draw a shape
 
     # ================================================================ building
 
@@ -107,9 +108,9 @@ class DesignController:
         menu.add_command(label="Text", command=lambda: self.add_simple("text"))
         menu.add_command(label="Arc text", command=lambda: self.add_simple("arctext"))
         menu.add_separator()
-        menu.add_command(label="Rectangle", command=lambda: self.add_simple("shape", shape="rect"))
-        menu.add_command(label="Circle / ellipse", command=lambda: self.add_simple("shape", shape="ellipse"))
-        menu.add_command(label="Line", command=lambda: self.add_simple("shape", shape="line", h_in=0.05))
+        menu.add_command(label="Rectangle (drag to draw)", command=lambda: self.start_draw("rect"))
+        menu.add_command(label="Circle / ellipse (drag to draw)", command=lambda: self.start_draw("ellipse"))
+        menu.add_command(label="Line (drag to draw)", command=lambda: self.start_draw("line"))
         add["menu"] = menu
         add.pack(side="left")
         for text, cmd, tip in (("▲", lambda: self.move_layer(+1), "Bring forward"),
@@ -283,6 +284,8 @@ class DesignController:
 
     def leave(self):
         app = self.app
+        if self.draw_kind:
+            self.cancel_draw()
         self.active = False
         app.set_estimate(None, 0, 0.0)
         self.toolbar.pack_forget()
@@ -971,6 +974,105 @@ class DesignController:
     def add_simple(self, kind, **kw):
         self._add(D.new_layer(kind, self.design, **kw))
 
+    # ---------------------------------------------------------------- drawing shapes
+
+    DRAW_HINT = ("Drag on the canvas to draw the {name}: Ctrl = {square}, Shift = from the center, "
+                 "Alt = no snapping, Esc = cancel. A click makes a 1-inch one.")
+
+    def start_draw(self, shape):
+        """Add → Rectangle / Circle / Line: the next drag on the canvas draws it corner to
+        corner (or end to end), like Inkscape."""
+        self.draw_kind = shape
+        if not self._shown():
+            self.app.view.set("Layout")
+            self.app.on_view_change()
+        self.app.canvas.configure(cursor="crosshair")
+        self.app.canvas.focus_set()
+        name = {"rect": "rectangle", "ellipse": "circle / ellipse", "line": "line"}[shape]
+        square = "15° steps" if shape == "line" else ("circle" if shape == "ellipse" else "square")
+        self.app.set_status(self.DRAW_HINT.format(name=name, square=square))
+
+    def cancel_draw(self):
+        if self.drag and self.drag.get("mode") == "draw":
+            layer = self.layer_by_id(self.drag["id"])
+            if layer:
+                self.design["layers"].remove(layer)
+                self.select(None)
+                self.request_composite()
+            self.drag = None
+        self.draw_kind = None
+        self.app.canvas.configure(cursor="arrow")
+        self.app.set_status("")
+
+    def _canvas_point(self, e, layer, guides):
+        """Mouse position in canvas inches, snapped to the canvas and other items (Alt = off)."""
+        s, ox, oy, dpi = self._screen()
+        x, y = (e.x - ox) / s / dpi, (e.y - oy) / s / dpi
+        if not e.state & 0x20000:
+            xs, ys = self._snap_targets(layer)
+            tol = ui_px(SNAP_PX) / s / dpi
+            bx, by = min(xs, key=lambda v: abs(v - x)), min(ys, key=lambda v: abs(v - y))
+            if abs(bx - x) < tol:
+                x = bx
+                guides.append(("x", bx * dpi))
+            if abs(by - y) < tol:
+                y = by
+                guides.append(("y", by * dpi))
+        return x, y
+
+    def _draw_press(self, e):
+        kind, guides = self.draw_kind, []
+        layer = D.new_layer("shape", self.design, shape=kind, w_in=0.01, h_in=0.05 if kind == "line" else 0.01)
+        x, y = self._canvas_point(e, layer, guides)
+        layer.update(x_in=x, y_in=y)
+        self.design["layers"].append(layer)
+        self.selected = layer["id"]
+        self.drag = {"id": layer["id"], "mode": "draw", "p0": (x, y), "x0": e.x, "y0": e.y,
+                     "layer": copy.deepcopy(layer), "snap": guides}
+
+    def _draw_update(self, layer, e):
+        """Shape from the press point to the mouse. Ctrl: square / circle (lines: 15° steps);
+        Shift: drawn out from the press point as the center."""
+        guides = []
+        x0, y0 = self.drag["p0"]
+        x1, y1 = self._canvas_point(e, layer, guides)
+        dx, dy = x1 - x0, y1 - y0
+        ctrl, shift = bool(e.state & 0x4), bool(e.state & 0x1)
+        if layer["shape"] == "line":
+            if ctrl:
+                a = round(math.atan2(dy, dx) / math.radians(15)) * math.radians(15)
+                n = math.hypot(dx, dy)
+                dx, dy = n * math.cos(a), n * math.sin(a)
+            if shift:
+                x0, y0 = x0 - dx, y0 - dy
+                dx, dy = 2 * dx, 2 * dy
+            layer.update(x_in=x0 + dx / 2, y_in=y0 + dy / 2, w_in=max(math.hypot(dx, dy), 0.01),
+                         rotation=round(math.degrees(math.atan2(dy, dx)) % 360, 2))
+        else:
+            if ctrl:
+                side = max(abs(dx), abs(dy))
+                dx, dy = math.copysign(side, dx), math.copysign(side, dy)
+            if shift:
+                layer.update(x_in=x0, y_in=y0, w_in=max(2 * abs(dx), 0.01), h_in=max(2 * abs(dy), 0.01))
+            else:
+                layer.update(x_in=x0 + dx / 2, y_in=y0 + dy / 2, w_in=max(abs(dx), 0.01), h_in=max(abs(dy), 0.01))
+        self.drag["snap"] = guides
+
+    def _draw_release(self, layer):
+        """Finishes the shape; a click (no real drag) makes a 1-inch one centered there."""
+        x0, y0 = self.drag["p0"]
+        if max(layer["w_in"], 0 if layer["shape"] == "line" else layer["h_in"]) < 0.05:
+            layer.update(x_in=x0, y_in=y0, w_in=1.0, rotation=0.0)
+            if layer["shape"] != "line":
+                layer["h_in"] = 1.0
+        self.drag = None
+        self.draw_kind = None
+        self.app.canvas.configure(cursor="arrow")
+        self.app.set_status("")
+        self.select(layer["id"])
+        self.nb.select(self.layer_tab)
+        self.changed()
+
     def delete_layer(self):
         layer = self.sel_layer()
         if not layer:
@@ -1230,6 +1332,9 @@ class DesignController:
         app.canvas.focus_set()
         if not app.disp:
             return
+        if self.draw_kind:
+            self._draw_press(e)
+            return
         layer = self.sel_layer()
         h = self.handles
         base = None
@@ -1296,6 +1401,8 @@ class DesignController:
             layer["rotation"] = round(rot % 360, 2)
         elif mode == "scale":
             self._scale(layer, start, e, s, ox, oy, dpi)
+        elif mode == "draw":
+            self._draw_update(layer, e)
         self._refresh_fields()
         # Live preview while dragging; resizing/rotating a photo re-renders on release (slow).
         cheap = mode == "move" or layer["type"] != "image"
@@ -1376,6 +1483,10 @@ class DesignController:
         app = self.app
         if self.drag or not app.disp:
             return
+        if self.draw_kind:
+            if str(app.canvas.cget("cursor")) != "crosshair":
+                app.canvas.configure(cursor="crosshair")
+            return
         cur, h = "arrow", self.handles
         if h:
             if math.hypot(e.x - h["rot"][0], e.y - h["rot"][1]) <= ui_px(HANDLE + 3):
@@ -1400,6 +1511,10 @@ class DesignController:
         if not self.drag:
             return
         layer = self.layer_by_id(self.drag["id"])
+        if self.drag["mode"] == "draw":
+            if layer:
+                self._draw_release(layer)
+            return
         moved = layer and layer != self.drag["layer"]
         if layer and layer["type"] == "image" and self.drag["mode"] in ("scale",):
             self.app.suspend_traces = True

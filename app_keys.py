@@ -77,7 +77,9 @@ class KeysMixin:
         dc = self.dc
         tools = {"tool_keep": "keep", "tool_remove": "remove", "brush_keep": "paint_keep",
                  "brush_erase": "paint_remove", "tool_pan": "pan"}
-        if action in tools:
+        if action == "tool_pan" and dc.active and dc.draw_kind:
+            dc.cancel_draw()                       # Esc while drawing a shape cancels it
+        elif action in tools:
             self._pick_tool(tools[action])
         elif action == "brush_smaller":
             self._resize_brush(1 / 1.2)

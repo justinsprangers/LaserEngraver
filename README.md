@@ -198,6 +198,9 @@ don't need Inkscape to set up a job.
    which files to export.
 2. **Add** (Layers panel): Photo, Logo / clip art (PNG), Vector file (SVG, PDF, AI, DXF), Text,
    Arc text, Rectangle, Circle / ellipse, Line.
+   Shapes are drawn like in Inkscape: pick one, then drag corner to corner on the canvas (a
+   line: end to end). **Ctrl** = square / circle (lines in 15° steps), **Shift** = draw out
+   from the center, **Alt** = no snapping, **Esc** = cancel. A plain click makes a 1-inch one.
 3. Arrange on the **Layout** view: it's fast because photos are shown as plain pictures. Switch
    to the **Design** view to see the real engraving; it only renders when you look at it.
    - Drag to move. Edges and centers snap to other items and to the canvas edges and center
