@@ -168,10 +168,45 @@ async function ensureFonts(files) {
   }
 }
 
+// Vector files: SVG text is turned into outlines with any bundled font, so all of them are
+// written first; DXF needs ezdxf (web/wheels, unzipped into site-packages once).
+const EZDXF_WHEEL = "wheels/ezdxf-1.4.5-py3-none-any.whl";
+let allFonts = null, ezdxfReady = null;
+function ensureAllFonts() {
+  allFonts ??= (async () => {
+    const m = JSON.parse(new TextDecoder().decode(await fetchBytes("fonts/fonts.json")));
+    await ensureFonts(Object.values(m.families).flatMap((s) => Object.values(s)));
+  })();
+  allFonts.catch(() => { allFonts = null; });
+  return allFonts;
+}
+function ensureEzdxf() {
+  ezdxfReady ??= (async () => {
+    progress("Loading the DXF reader…", null);
+    await py.loadPackage(["pyparsing", "typing-extensions"]);
+    await ensureAllFonts();
+    py.FS.writeFile("/tmp/ezdxf.whl", await fetchBytes(EZDXF_WHEEL));
+    py.runPython(`
+import site, zipfile
+zipfile.ZipFile("/tmp/ezdxf.whl").extractall(site.getsitepackages()[0])
+from ezdxf.fonts import fonts
+fonts.font_manager.build(["/fonts"], support_dirs=False)   # DXF text uses the bundled fonts
+fonts.font_manager._fallback_font_name = "Arimo-Regular.ttf"   # (ezdxf's own fallback, DejaVu, isn't bundled)
+`);
+  })();
+  ezdxfReady.catch(() => { ezdxfReady = null; });
+  return ezdxfReady;
+}
+async function ensureVectorTools(paths) {
+  if (paths.some((p) => /\.svg$/i.test(p))) await ensureAllFonts();
+  if (paths.some((p) => /\.dxf$/i.test(p))) await ensureEzdxf();
+}
+
 // Everything a design render / export needs first: its fonts and background removals.
 async function prepareDesign(design, mode) {
   await designInit();
   const json = JSON.stringify(design);
+  await ensureVectorTools(design.layers.filter((l) => l.type === "svg").map((l) => l.src || ""));
   await ensureFonts(JSON.parse(engine.font_files(json)));
   for (const path of JSON.parse(engine.cutouts_needed(json, mode))) await cutout(path);
   return json;
@@ -209,7 +244,14 @@ const handlers = {
     const json = await prepareDesign(design, "design");
     return engine.render_region(json, ...box);
   },
-  readAsset: ({ path }) => engine.read_asset(path),
+  readAsset: ({ path }) => engine.read_asset(path),  addVector: async ({ design, path, name }) => {
+    await designInit();
+    await ensureVectorTools([path]);
+    progress(`Reading ${name}…`, null);
+    return JSON.parse(engine.vector_add(JSON.stringify(design), path, name));
+  },
+  vectorInfo: async ({ layer }) => (await ensureVectorTools([layer.src || ""]), JSON.parse(engine.vector_info(JSON.stringify(layer)))),
+  vectorSplit: async ({ layer, by }) => (await ensureVectorTools([layer.src || ""]), JSON.parse(engine.vector_split(JSON.stringify(layer), by))),
   exportDesign: async ({ design, name, factor = 1 }) => {
     const json = await prepareDesign(design, "export");
     progress("Saving the engraving…", null);
@@ -236,6 +278,7 @@ onmessage = (e) => {
     } catch (err) {
       let msg = String(err && err.message || err);
       if (msg.includes("Traceback")) msg = msg.trim().split("\n").filter(Boolean).pop();
+      msg = msg.replace(/^(ValueError|RuntimeError|FileNotFoundError): /, "");   // (the message is for people)
       postMessage({ reqId, ok: false, error: msg });
     }
   });

@@ -14,8 +14,8 @@ There are two versions that share the same processing code (`engrave_core.py`):
 - **Web version** (`web/`): runs in any modern browser with nothing to install, for sharing
   (e.g. a makerspace). Photo and comic styles, AI background removal with the same fix tools
   (smart keep / remove, brush keep / erase), presets, materials and PNG / outline downloads.
-  Design mode too, except vector files (SVG, PDF, AI, DXF), which are coming. Photos are
-  processed on the viewer's own computer, never uploaded.
+  Design mode too, with SVG and DXF files (PDF and Illustrator files need the desktop app).
+  Photos are processed on the viewer's own computer, never uploaded.
 
 ## Web version
 
@@ -64,9 +64,13 @@ How it works:
   Score / Cut with weld and offset, **Save engraving** (PNG, cut / score SVG or DXF, all-in-one
   SVG or PDF, test copy) and `.lep` projects that open in both versions. The design (with its
   photos and added fonts) is kept in the browser, so it's still there after a reload; **Clear
-  saved design** on the Design tab removes it. Not yet: vector files. Without PyMuPDF in the
-  browser, the all-in-one PDF is written by `vectors._write_pdf_plain` (the desktop uses it too
-  if PyMuPDF is missing).
+  saved design** on the Design tab removes it. Vector files: SVG and DXF, with a job per
+  color, Break apart and Split by color, like the desktop. There's no PyMuPDF for browsers, so
+  the web version reads SVGs with its own reader (`vecfile._load_svg_plain`), writes the
+  all-in-one PDF with `vectors._write_pdf_plain`, and can't open PDF / AI files. DXF files are
+  read with ezdxf, stored in `web/wheels/` (see its README). DXF text in CAD fonts (such as
+  AutoCAD's `txt`) is drawn with Arimo in the browser, so it can look different from the
+  desktop app on a computer with those fonts.
   Fonts: browsers can't hand Python your installed fonts, so the web version uses the
   open-licence fonts in `web/fonts/` (made by `python web/tools/make_fonts.py`; add a family
   to its list and run it again). Arial, Times New Roman and Courier New in desktop projects use

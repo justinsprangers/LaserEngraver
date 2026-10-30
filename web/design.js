@@ -21,6 +21,8 @@ const OP_LABELS = { engrave: "Engrave", score: "Score", cut: "Cut" };
 const PREVIEW_MAX_PX = 8e6;    // the Design view renders at a lower DPI above this many dots
 const KEEP_SPARE = 40;         // rendered layers kept for undo / show-hide beyond the visible ones
 const IMAGE_TYPES = /\.(png|jpe?g|bmp|webp|tiff?|gif)$/i;
+const VECTOR_TYPES = /\.(svg|dxf|pdf|ai)$/i;     // (PDF / AI: the engine explains they're desktop-only)
+const SPLIT_WARN = 150;        // Break apart asks first above this many pieces
 const FMT_LABELS = { none: "None", svg: "SVG", dxf: "DXF", "svg+dxf": "SVG + DXF" };
 const COMB_LABELS = { none: "None", svg: "SVG", pdf: "PDF", "svg+pdf": "SVG + PDF" };
 const GUARD_PX = 100e6;        // above this many dots, warn that saving may run out of memory
@@ -96,7 +98,9 @@ Object.assign(DM, {
     if (l.type === "text" || l.type === "arctext") detail = (l.text || "").split("\n")[0].slice(0, 24);
     else if (l.type === "shape") detail = { rect: "rectangle", ellipse: "ellipse", line: "line" }[l.shape || "rect"];
     else detail = l.name && l.name !== kind ? l.name : (l.src || "").split("/").pop() || "(no file)";
-    const op = l.type !== "svg" && (l.op || "engrave") !== "engrave" ? OP_LABELS[l.op] : "";
+    if (l.type === "svg" && l.parts) detail += ` (${l.parts.length} piece${l.parts.length === 1 ? "" : "s"})`;
+    const vi = l.type === "svg" && this.vinfo.get(this.vkey(l));
+    const op = l.type !== "svg" ? ((l.op || "engrave") !== "engrave" ? OP_LABELS[l.op] : "") : (vi && vi.ops) || "";
     return `${kind}: ${detail}${op ? `  [${op}]` : ""}${l.visible === false ? "  (hidden)" : ""}`;
   },
   // Screen (CSS px in the canvas) <-> canvas inches.
@@ -332,7 +336,9 @@ Object.assign(DM, {
   async addFiles(list, kind = "image") {
     const lep = [...list].find((f) => /\.lep$/i.test(f.name));
     if (lep) return this.confirmDiscard("Open this project?") && this.openProjectFile(lep);
-    const imgs = [...list].filter((f) => f.type.startsWith("image/") || IMAGE_TYPES.test(f.name));
+    for (const f of [...list].filter((x) => VECTOR_TYPES.test(x.name))) await this.addVector(f);
+    if (kind === "svg") return;
+    const imgs = [...list].filter((f) => !VECTOR_TYPES.test(f.name) && (f.type.startsWith("image/") || IMAGE_TYPES.test(f.name)));
     if (!imgs.length) return;
     const c = this.design.canvas;
     for (const [i, file] of imgs.entries()) {
@@ -357,6 +363,20 @@ Object.assign(DM, {
     }
     doneProgress();
     setStatus(`Added ${imgs.length === 1 ? imgs[0].name : `${imgs.length} images`}`);
+  },
+  // A vector file (SVG, DXF) at its real size (desktop: design_ui.add_vector).
+  async addVector(file) {
+    showProgress(`Adding ${file.name}…`, null);
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const keep = IDB.ok ? bytes.slice() : null;
+      const a = await call("addAsset", { name: file.name, bytes }, [bytes.buffer]);
+      const r = await call("addVector", { design: this.design, path: a.path, name: file.name });
+      if (keep) await IDB.put("assets", a.path, { name: file.name, bytes: keep });
+      doneProgress();
+      this.add(r.layer);
+      setStatus(r.message);
+    } catch (e) { fail(`Couldn't add ${file.name}: ${e.message}`); }
   },
   addSimple(kind) {
     const l = Object.assign(clone(this.templates[kind]), { id: newId() });
@@ -1261,6 +1281,8 @@ Object.assign(DM, {
       ["Left", "Top", "Right", "Bottom"].forEach((side, i) => this.crop(s, side, i));
       p.append(el("p", { className: "hint", textContent: "Style, tone and background removal for this photo are on the " +
         "Basic / Photo tuning / Comic tuning tabs." }));
+    } else if (t === "svg") {
+      this.vectorPanel(p, l);
     } else if (t === "logo") {
       s = section(p, "Logo");
       this.num(s, "Dark threshold (0-255)", "threshold", 5, 0, 255, true);
@@ -1299,6 +1321,101 @@ Object.assign(DM, {
         "around text or a logo, or kerf compensation (about half the laser's cut width). Offset and Outer outline " +
         "also weld. Open lines aren't offset.");
     }
+  },
+  // --- vector-file layers: file info, size buttons, a job per color, split buttons
+  vinfo: new Map(),            // vkey -> engine.vector_info (also gives the list its "Cut + Score")
+  vkey(l) { return JSON.stringify([l.src, l.parts, l.jobs, l.jobs_from, l.box]); },
+  async vectorInfo(l) {
+    const k = this.vkey(l);
+    if (!this.vinfo.has(k)) {
+      this.vinfo.set(k, await call("vectorInfo", { layer: l }));
+      this.refreshList();
+    }
+    return this.vinfo.get(k);
+  },
+  async vectorPanel(p, l) {
+    const s = section(p, "Vector file");
+    const body = el("div", {}, el("p", { className: "hint", textContent: "Reading the file…" }));
+    s.append(body);
+    const jobs = section(p, "What the laser does with each color");     // (filled in below, in place)
+    let info;
+    try { info = await this.vectorInfo(l); } catch (e) { info = { error: e.message }; }
+    if (this.sel() !== l || !body.isConnected) return;          // another layer was selected meanwhile
+    body.replaceChildren();
+    if (info.error) {
+      body.append(el("p", { className: "warn", textContent: `Couldn't read the file: ${info.error}` }));
+      jobs.remove();
+      return;
+    }
+    const pct = l.w_in / info.w_in * 100;
+    body.append(el("p", { className: "hint", textContent: `${l.name || l.src.split("/").pop()}: ${info.n} shape` +
+      `${info.n === 1 ? "" : "s"}, ${(info.w_in * 25.4).toFixed(1)} × ${(info.h_in * 25.4).toFixed(1)} mm at 1:1` +
+      (Math.abs(pct - 100) > 0.1 ? ` (now ${pct.toFixed(0)}%)` : "") }));
+    for (const n of info.notes) body.append(el("p", { className: "warn small", textContent: "• " + n }));
+    const btn = (text, tip, fn) => {
+      const b = el("button", { className: "btn sm", type: "button", textContent: text, title: tip });
+      b.addEventListener("click", fn);
+      return b;
+    };
+    const sizes = el("div", { className: "line" }, btn("1:1 size", "Back to the size saved in the file (no rotation).", () => {
+      Object.assign(l, { w_in: info.w_in, h_in: info.h_in, rotation: 0 });
+      this.buildLayerTab();
+      this.changed();
+    }));
+    if (l.parts == null) {
+      sizes.append(btn("Canvas = file page", "Makes the canvas the size of the file's page and puts the drawing where " +
+        "it sits on that page (1:1), e.g. for a ready-made cut sheet.", () => {
+        const [bl, bt, br, bb] = info.box;
+        Object.assign(l, { w_in: br - bl, h_in: bb - bt, rotation: 0, x_in: (bl + br) / 2, y_in: (bt + bb) / 2 });
+        this.design.canvas = { width_in: r4(info.page[0]), height_in: r4(info.page[1]) };
+        this.refreshDesignTab();
+        this.needFit = true;
+        this.fit();
+        this.buildLayerTab();
+        this.changed();
+      }));
+    }
+    body.append(sizes);
+    jobs.title = "Engrave: burned into the image. Score: a light line along it (blue). Cut: cut along it (red). " +
+      "Blank: not burned, and hides anything under it. Ignore: left out. Fill colors score / cut along their outline. " +
+      "Defaults: red lines cut, blue lines score, hairlines (< 0.1 mm) cut, dark fills and thick lines engrave, " +
+      "light colors are blank.";
+    jobs.querySelector("h4").append(el("span", { className: "tip", textContent: " ⓘ" }));
+    for (const [key, count, label] of info.groups) {
+      const color = key.slice(2), line = key.startsWith("s:");
+      const sw = el("span", { className: "swatch" + (line ? " line" : "") });
+      sw.style.setProperty("--c", color);
+      const sel = el("select", {}, ...Object.entries(info.job_labels).map(([v, t]) => el("option", { value: v, textContent: t })));
+      sel.value = info.jobs[key] || "engrave";
+      sel.addEventListener("change", () => {
+        l.jobs = { ...(l.jobs || {}), [key]: sel.value };
+        this.changed();
+        this.vectorInfo(l);
+      });
+      jobs.append(el("div", { className: "job" }, sw, el("span", { className: "name", textContent: `${label} (${count})` }), sel));
+    }
+    this.num(jobs, "Engraved line width (mm)", "line_mm", 0.05, 0, 20, false, "Width for line colors set to Engrave. " +
+      "0 = as drawn in the file (hairlines still burn one dot wide).");
+    const groupsN = info.groups.length;
+    jobs.append(el("div", { className: "line" },
+      btn("Break apart", "Makes every shape in the file its own layer, so you can move, delete or set each one " +
+        "separately. Ctrl+Z undoes it.", () => this.split(l, "item", info.n)),
+      btn("Split by color", "One layer per color.", () => this.split(l, "color", groupsN))));
+  },
+  async split(l, by, pieces) {
+    if (pieces < 2) return alert(`This layer has only one ${by === "item" ? "shape" : "color"}.`);
+    if (pieces > SPLIT_WARN && !confirm(`This makes ${pieces} layers. Continue?`)) return;
+    try {
+      showProgress("Splitting…", null);
+      const layers = await call("vectorSplit", { layer: l, by });
+      doneProgress();
+      const all = this.design.layers, i = all.indexOf(l);
+      if (i < 0) return;
+      all.splice(i, 1, ...layers);
+      this.select(layers[layers.length - 1].id);
+      this.changed();
+      setStatus(`Split into ${layers.length} layers (Ctrl+Z to undo)`);
+    } catch (e) { fail(`Couldn't split it: ${e.message}`); }
   },
   row(parent, label, input, tip) {
     const r = el("div", { className: "row field" }, el("label", { textContent: label }), input);
@@ -1584,10 +1701,11 @@ for (const b of addMenu.querySelectorAll("[data-add]")) {
   b.addEventListener("click", () => {
     addMenu.hidden = true;
     const k = b.dataset.add;
-    if (k === "image" || k === "logo") {
+    if (k === "image" || k === "logo" || k === "svg") {
       const inp = $("#artInput");
       inp.dataset.kind = k;
-      inp.multiple = k === "image";
+      inp.multiple = k !== "logo";
+      inp.accept = k === "svg" ? ".svg,.dxf" : "image/*";
       inp.click();
     } else if (k === "text" || k === "arctext") DM.addSimple(k);
     else DM.startDraw(k);

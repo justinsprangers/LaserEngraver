@@ -250,6 +250,12 @@ label.link { display: inline-block; }
   padding: 8px 14px; border-radius: 8px; background: var(--field); box-shadow: var(--shadow); font-size: 13px;
   pointer-events: none; text-align: center; }
 
+.warn.small, p.warn { font-size: 12.5px; margin: 4px 0; }
+.job { display: grid; grid-template-columns: 24px 1fr 130px; align-items: center; gap: 8px; margin: 5px 0; }
+.job .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.swatch { width: 22px; height: 14px; border-radius: 3px; background: var(--c); border: 1px solid var(--border); }
+.swatch.line { height: 4px; border: none; border-radius: 2px; }
+
 /* --- Narrow screens: settings below the preview */
 @media (max-width: 820px) {
   body { display: block; overflow: auto; height: auto; }

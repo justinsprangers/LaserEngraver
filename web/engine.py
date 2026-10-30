@@ -307,6 +307,96 @@ def new_layer(kind, design_json, kw_json="{}"):
     return json.dumps(D.new_layer(kind, json.loads(design_json), **json.loads(kw_json)))
 
 
+# --- Vector-file layers (same steps as design_ui.add_vector / _vector_panel / split_vector) ---
+
+def vector_add(design_json, path, name):
+    """A vector-file layer at the file's real size. If its page is the canvas size, the drawing
+    goes where it sits on the page; otherwise it's centered."""
+    import design as D
+    import vecfile as V
+    d = json.loads(design_json)
+    doc = V.load(path)                           # raises ValueError with a readable message
+    if not doc["items"]:
+        raise ValueError("No drawable shapes were found in this file.")
+    c = d["canvas"]
+    layer = D.new_layer("svg", d, src=path)
+    w, h = D.vector_size(layer, doc)
+    if not doc["sized"]:                         # no physical size: fit it like a logo
+        f = min(c["width_in"], c["height_in"]) * 0.35 / max(w, h)
+        w, h = w * f, h * f
+    layer.update(w_in=w, h_in=h, name=name)
+    same_page = (abs(doc["w_in"] - c["width_in"]) < 0.02 * c["width_in"]
+                 and abs(doc["h_in"] - c["height_in"]) < 0.02 * c["height_in"])
+    if doc["sized"] and same_page:
+        l, t, r, b = D.vector_box(layer, doc)
+        layer.update(x_in=(l + r) / 2, y_in=(t + b) / 2)
+    msg = f"Added {name} at {w * 25.4:.1f} × {h * 25.4:.1f} mm"
+    if w > c["width_in"] + 1e-6 or h > c["height_in"] + 1e-6:
+        msg += " (bigger than the canvas)"
+    return json.dumps({"layer": layer, "message": msg})
+
+
+OP_LABELS = {"engrave": "Engrave", "score": "Score", "cut": "Cut"}
+
+
+def vector_info(layer_json):
+    """What the Layer tab shows for a vector-file layer: size, notes, color groups and jobs."""
+    import design as D
+    import vecfile as V
+    layer = json.loads(layer_json)
+    try:
+        doc = V.load(layer["src"])
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+    parts = layer.get("parts")
+    w, h = D.vector_size(layer, doc)
+    jobs = D.vector_jobs(layer, doc)
+    groups = V.groups(doc, parts)
+    used = {jobs.get(k) for k, _, _ in groups}
+    ops = [OP_LABELS[o] for o in ("engrave", "score", "cut") if o in used]
+    return json.dumps({
+        "n": len(V.part_ids(doc, parts)), "w_in": w, "h_in": h, "sized": doc["sized"],
+        "notes": doc["notes"] + ([] if doc["sized"] else ["The file doesn't state a physical size: set the width here."]),
+        "groups": [[k, n, label] for k, n, label in groups], "jobs": {k: jobs.get(k) for k, _, _ in groups},
+        "job_labels": V.JOB_LABELS, "ops": "" if ops in ([], ["Engrave"]) else " + ".join(ops),
+        "box": list(D.vector_box(layer, doc)), "page": [doc["w_in"], doc["h_in"]]})
+
+
+def vector_split(layer_json, by):
+    """Break apart (one layer per shape) or split by color (one layer per color group); each
+    new layer shows its shapes exactly where they were. Returns the new layers."""
+    import copy
+    import math
+    import os
+    import uuid
+    import design as D
+    import vecfile as V
+    layer = json.loads(layer_json)
+    doc = V.load(layer["src"])
+    buckets = {}
+    for i in V.part_ids(doc, layer.get("parts")):
+        key = i if by == "item" else (V.item_keys(doc["items"][i]) or ["?"])[0]
+        buckets.setdefault(key, []).append(i)
+    pieces = list(buckets.values())
+    l0, t0, r0, b0 = D.vector_box(layer, doc)
+    sx, sy = layer["w_in"] / (r0 - l0), layer["h_in"] / (b0 - t0)
+    a = math.radians(layer["rotation"])
+    ca, sa = math.cos(a), math.sin(a)
+    new = []
+    for part in pieces:
+        nl = copy.deepcopy(layer)
+        nl.update(id=uuid.uuid4().hex[:10], parts=part, box="content")
+        l, t, r, b = V.box(doc, part)
+        dx, dy = ((l + r) / 2 - (l0 + r0) / 2) * sx, ((t + b) / 2 - (t0 + b0) / 2) * sy
+        nl.update(w_in=(r - l) * sx, h_in=(b - t) * sy,
+                  x_in=layer["x_in"] + dx * ca - dy * sa, y_in=layer["y_in"] + dx * sa + dy * ca)
+        if by == "color":
+            color = V.group_label((V.item_keys(doc["items"][part[0]]) or ["f:#000000"])[0])
+            nl["name"] = f"{layer.get('name') or os.path.basename(layer['src'])} – {color}"
+        new.append(nl)
+    return json.dumps(new)
+
+
 def _rgba(value, cover, draft):
     """A layer's bitmap for the page: gray (Layout) or black ink / white blank (Design), opaque
     where the layer covers what's below it, transparent elsewhere."""

@@ -206,7 +206,14 @@ def _close_enough(a, b, eps=1e-6):
 # ------------------------------------------------------------------------------
 
 def _load_mupdf(path, ext):
-    import pymupdf
+    try:
+        import pymupdf
+    except ImportError:               # the web version: there's no PyMuPDF build for browsers
+        if ext != ".svg":
+            raise ValueError("PDF and Illustrator files can only be opened in the desktop app here. "
+                             "Save the drawing as SVG or DXF instead.")
+        with open(path, "rb") as f:
+            return _load_svg_plain(f.read())
     notes = []
     if ext == ".svg":
         with open(path, "rb") as f:
@@ -371,8 +378,10 @@ def _css_rules(root):
     return rules
 
 
-def _prepare_svg(raw):
-    """Returns (svg bytes for MuPDF, width in, height in, sized, notes)."""
+def _prepare_svg(raw, stand_in=None, as_tree=False):
+    """Returns (svg bytes for MuPDF, width in, height in, sized, notes). stand_in: a font for
+    text whose fonts aren't installed (else such text is left for MuPDF to convert); as_tree:
+    return the prepared root element instead of bytes."""
     notes = []
     try:
         _register_namespaces(raw)
@@ -435,8 +444,17 @@ def _prepare_svg(raw):
     parent = {c: p for p in root.iter() for c in p}
     for el in [e for e in root.iter() if _local(e.tag) == "text"]:
         try:
-            if not _text_to_path(el, parent):
-                notes.append("Text on a path isn't supported; it was converted with a stand-in font.")
+            try:
+                done = _text_to_path(el, parent)
+            except LookupError:
+                if not stand_in:
+                    raise
+                done = _text_to_path(el, parent, stand_in)
+                notes.append(f"Some text uses fonts that aren't available here and was converted with "
+                             f"{stand_in}.")
+            if not done:
+                notes.append("Text on a path isn't supported; it was converted with a stand-in font."
+                             if not stand_in else "Text on a path isn't supported and was left out.")
         except Exception:
             pass                         # left as text: MuPDF converts it (see _load_mupdf)
     flow = [e for e in root.iter() if _local(e.tag) == "flowRoot"]
@@ -445,7 +463,465 @@ def _prepare_svg(raw):
             parent[el].remove(el)
     if flow:
         notes.append("Flowed text (old Inkscape text boxes) was skipped: convert it to paths first.")
-    return ET.tostring(root), w_in, h_in, sized, notes
+    return (root if as_tree else ET.tostring(root)), w_in, h_in, sized, notes
+
+
+# ------------------------------------------------------------------------------
+# SVG without MuPDF (the web version): the prepared SVG's shapes read directly
+# ------------------------------------------------------------------------------
+# Same result format as _load_mupdf: paths, rects, circles, ellipses, lines, polylines and
+# polygons with their transforms, <use> / <symbol>, nested <svg>, inherited styles. Not drawn
+# (as on the desktop): clipping, masks, pictures, markers. Gradients and patterns are taken as
+# one solid color.
+
+_CSS_COLORS = dict(zip(*[iter("""
+aliceblue f0f8ff antiquewhite faebd7 aqua 00ffff aquamarine 7fffd4 azure f0ffff beige f5f5dc bisque ffe4c4
+black 000000 blanchedalmond ffebcd blue 0000ff blueviolet 8a2be2 brown a52a2a burlywood deb887 cadetblue 5f9ea0
+chartreuse 7fff00 chocolate d2691e coral ff7f50 cornflowerblue 6495ed cornsilk fff8dc crimson dc143c cyan 00ffff
+darkblue 00008b darkcyan 008b8b darkgoldenrod b8860b darkgray a9a9a9 darkgreen 006400 darkgrey a9a9a9
+darkkhaki bdb76b darkmagenta 8b008b darkolivegreen 556b2f darkorange ff8c00 darkorchid 9932cc darkred 8b0000
+darksalmon e9967a darkseagreen 8fbc8f darkslateblue 483d8b darkslategray 2f4f4f darkslategrey 2f4f4f
+darkturquoise 00ced1 darkviolet 9400d3 deeppink ff1493 deepskyblue 00bfff dimgray 696969 dimgrey 696969
+dodgerblue 1e90ff firebrick b22222 floralwhite fffaf0 forestgreen 228b22 fuchsia ff00ff gainsboro dcdcdc
+ghostwhite f8f8ff gold ffd700 goldenrod daa520 gray 808080 grey 808080 green 008000 greenyellow adff2f
+honeydew f0fff0 hotpink ff69b4 indianred cd5c5c indigo 4b0082 ivory fffff0 khaki f0e68c lavender e6e6fa
+lavenderblush fff0f5 lawngreen 7cfc00 lemonchiffon fffacd lightblue add8e6 lightcoral f08080 lightcyan e0ffff
+lightgoldenrodyellow fafad2 lightgray d3d3d3 lightgreen 90ee90 lightgrey d3d3d3 lightpink ffb6c1
+lightsalmon ffa07a lightseagreen 20b2aa lightskyblue 87cefa lightslategray 778899 lightslategrey 778899
+lightsteelblue b0c4de lightyellow ffffe0 lime 00ff00 limegreen 32cd32 linen faf0e6 magenta ff00ff maroon 800000
+mediumaquamarine 66cdaa mediumblue 0000cd mediumorchid ba55d3 mediumpurple 9370db mediumseagreen 3cb371
+mediumslateblue 7b68ee mediumspringgreen 00fa9a mediumturquoise 48d1cc mediumvioletred c71585
+midnightblue 191970 mintcream f5fffa mistyrose ffe4e1 moccasin ffe4b5 navajowhite ffdead navy 000080
+oldlace fdf5e6 olive 808000 olivedrab 6b8e23 orange ffa500 orangered ff4500 orchid da70d6 palegoldenrod eee8aa
+palegreen 98fb98 paleturquoise afeeee palevioletred db7093 papayawhip ffefd5 peachpuff ffdab9 peru cd853f
+pink ffc0cb plum dda0dd powderblue b0e0e6 purple 800080 rebeccapurple 663399 red ff0000 rosybrown bc8f8f
+royalblue 4169e1 saddlebrown 8b4513 salmon fa8072 sandybrown f4a460 seagreen 2e8b57 seashell fff5ee
+sienna a0522d silver c0c0c0 skyblue 87ceeb slateblue 6a5acd slategray 708090 slategrey 708090 snow fffafa
+springgreen 00ff7f steelblue 4682b4 tan d2b48c teal 008080 thistle d8bfd8 tomato ff6347 turquoise 40e0d0
+violet ee82ee wheat f5deb3 white ffffff whitesmoke f5f5f5 yellow ffff00 yellowgreen 9acd32
+""".split())] * 2))
+_INHERITED = ("fill", "stroke", "stroke-width", "fill-rule", "fill-opacity", "stroke-opacity", "visibility",
+              "stroke-linecap", "stroke-linejoin", "color")
+_NOT_DRAWN = {"defs", "clipPath", "mask", "pattern", "marker", "symbol", "linearGradient", "radialGradient",
+              "style", "title", "desc", "metadata", "script", "filter", "foreignObject", "image", "text",
+              "font", "font-face", "cursor", "view", "animate", "set"}
+_KAPPA = 0.5522847498307936          # cubic Bézier control distance for a quarter circle
+
+
+def _mat_mul(m, n):
+    a, b, c, d, e, f = m
+    a2, b2, c2, d2, e2, f2 = n
+    return (a * a2 + c * b2, b * a2 + d * b2, a * c2 + c * d2, b * c2 + d * d2,
+            a * e2 + c * f2 + e, b * e2 + d * f2 + f)
+
+
+def _transform(text):
+    m = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+    for name, args in re.findall(r"(matrix|translate|scale|rotate|skewX|skewY)\s*\(([^)]*)\)", text or ""):
+        v = _nums(args)
+        if name == "matrix" and len(v) == 6:
+            t = tuple(v)
+        elif name == "translate" and v:
+            t = (1, 0, 0, 1, v[0], v[1] if len(v) > 1 else 0.0)
+        elif name == "scale" and v:
+            t = (v[0], 0, 0, v[1] if len(v) > 1 else v[0], 0, 0)
+        elif name == "rotate" and v:
+            a = math.radians(v[0])
+            t = (math.cos(a), math.sin(a), -math.sin(a), math.cos(a), 0, 0)
+            if len(v) == 3:
+                t = _mat_mul(_mat_mul((1, 0, 0, 1, v[1], v[2]), t), (1, 0, 0, 1, -v[1], -v[2]))
+        elif name == "skewX" and v:
+            t = (1, 0, math.tan(math.radians(v[0])), 1, 0, 0)
+        elif name == "skewY" and v:
+            t = (1, math.tan(math.radians(v[0])), 0, 1, 0, 0)
+        else:
+            continue
+        m = _mat_mul(m, t)
+    return m
+
+
+def _viewport(vb, x, y, w, h, par):
+    """Transform from a viewBox (vx, vy, vw, vh) into the box x, y, w, h (preserveAspectRatio)."""
+    vx, vy, vw, vh = vb
+    if vw <= 0 or vh <= 0:
+        return (1, 0, 0, 1, x, y)
+    sx, sy = w / vw, h / vh
+    par = (par or "xMidYMid meet").split()
+    align = par[0] if par else "xMidYMid"
+    if align != "none":
+        s = max(sx, sy) if len(par) > 1 and par[1] == "slice" else min(sx, sy)
+        ax = {"xMin": 0.0, "xMid": 0.5, "xMax": 1.0}.get(align[:4], 0.5)
+        ay = {"YMin": 0.0, "YMid": 0.5, "YMax": 1.0}.get(align[4:], 0.5)
+        x += (w - vw * s) * ax
+        y += (h - vh * s) * ay
+        sx = sy = s
+    return (sx, 0, 0, sy, x - vx * sx, y - vy * sy)
+
+
+def _arc_curves(p0, rx, ry, phi, large, sweep, p1):
+    """An SVG elliptical arc as cubic Béziers [(c1, c2, p), ...] (endpoint -> center form)."""
+    if rx == 0 or ry == 0 or p0 == p1:
+        return [(p0, p1, p1)]
+    rx, ry = abs(rx), abs(ry)
+    cp, sp = math.cos(phi), math.sin(phi)
+    dx, dy = (p0[0] - p1[0]) / 2, (p0[1] - p1[1]) / 2
+    x1, y1 = cp * dx + sp * dy, -sp * dx + cp * dy
+    lam = x1 * x1 / (rx * rx) + y1 * y1 / (ry * ry)
+    if lam > 1:
+        rx, ry = rx * math.sqrt(lam), ry * math.sqrt(lam)
+    num = rx * rx * ry * ry - rx * rx * y1 * y1 - ry * ry * x1 * x1
+    den = rx * rx * y1 * y1 + ry * ry * x1 * x1
+    k = math.sqrt(max(0.0, num / den)) if den else 0.0
+    if large == sweep:
+        k = -k
+    cx1, cy1 = k * rx * y1 / ry, -k * ry * x1 / rx
+    cx = cp * cx1 - sp * cy1 + (p0[0] + p1[0]) / 2
+    cy = sp * cx1 + cp * cy1 + (p0[1] + p1[1]) / 2
+
+    def ang(ux, uy, vx, vy):
+        a = math.atan2(ux * vy - uy * vx, ux * vx + uy * vy)
+        return a
+
+    t1 = ang(1, 0, (x1 - cx1) / rx, (y1 - cy1) / ry)
+    dt = ang((x1 - cx1) / rx, (y1 - cy1) / ry, (-x1 - cx1) / rx, (-y1 - cy1) / ry)
+    if not sweep and dt > 0:
+        dt -= 2 * math.pi
+    elif sweep and dt < 0:
+        dt += 2 * math.pi
+    n = max(1, math.ceil(abs(dt) / (math.pi / 2) - 1e-9))
+    d = dt / n
+    alpha = 4 / 3 * math.tan(d / 4)
+    out = []
+
+    def pt(t):
+        x, y = rx * math.cos(t), ry * math.sin(t)
+        return cx + cp * x - sp * y, cy + sp * x + cp * y
+
+    def deriv(t):
+        x, y = -rx * math.sin(t), ry * math.cos(t)
+        return cp * x - sp * y, sp * x + cp * y
+
+    t = t1
+    for i in range(n):
+        a, b = pt(t), pt(t + d)
+        da, db = deriv(t), deriv(t + d)
+        out.append(((a[0] + alpha * da[0], a[1] + alpha * da[1]), (b[0] - alpha * db[0], b[1] - alpha * db[1]),
+                    p1 if i == n - 1 else b))
+        t += d
+    return out
+
+
+def _path_subs(d):
+    """SVG path data -> [(start, segs, closed), ...] in user units."""
+    tokens = re.findall(r"[MmLlHhVvCcSsQqTtAaZz]|[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?", d or "")
+    subs, segs, start, cur = [], [], None, (0.0, 0.0)
+    last_c = last_q = None               # reflected control points for S / T
+    i, cmd = 0, None
+
+    def num():
+        nonlocal i
+        v = float(tokens[i])
+        i += 1
+        return v
+
+    def flag():                          # arc flags may be written without separators ("011")
+        nonlocal i
+        t = tokens[i]
+        if len(t) > 1 and t[0] in "01" and not t.startswith(("0.", "1.")):
+            tokens[i] = t[1:]
+            return t[0] == "1"
+        i += 1
+        return float(t) != 0
+
+    def finish(closed=False):
+        nonlocal segs
+        if start is not None and segs:
+            subs.append((start, segs, closed or _close_enough(start, cur)))
+        segs = []
+
+    while i < len(tokens):
+        t = tokens[i]
+        if t.isalpha():
+            cmd = t
+            i += 1
+            if cmd in "Zz":
+                if start is not None and segs and not _close_enough(cur, start):
+                    segs.append(("L", start))
+                finish(True)
+                cur = start if start is not None else cur     # (drawing on starts a subpath here)
+                start = None
+                last_c = last_q = None
+                continue
+        if cmd is None:
+            i += 1
+            continue
+        rel = cmd.islower()
+        c = cmd.upper()
+        try:
+            if c == "M":
+                finish()
+                p = (num(), num())
+                cur = (cur[0] + p[0], cur[1] + p[1]) if rel else p
+                start = cur
+                cmd = "l" if rel else "L"                  # further pairs are line-tos
+                last_c = last_q = None
+                continue
+            if start is None:                              # drawing after Z (or no M yet)
+                start = cur
+            if c == "L":
+                p = (num(), num())
+                cur = (cur[0] + p[0], cur[1] + p[1]) if rel else p
+                segs.append(("L", cur))
+                last_c = last_q = None
+            elif c == "H":
+                x = num()
+                cur = (cur[0] + x if rel else x, cur[1])
+                segs.append(("L", cur))
+                last_c = last_q = None
+            elif c == "V":
+                y = num()
+                cur = (cur[0], cur[1] + y if rel else y)
+                segs.append(("L", cur))
+                last_c = last_q = None
+            elif c in "CS":
+                if c == "C":
+                    c1 = (num(), num())
+                    if rel:
+                        c1 = (cur[0] + c1[0], cur[1] + c1[1])
+                else:
+                    c1 = (2 * cur[0] - last_c[0], 2 * cur[1] - last_c[1]) if last_c else cur
+                c2, p = (num(), num()), (num(), num())
+                if rel:
+                    c2, p = (cur[0] + c2[0], cur[1] + c2[1]), (cur[0] + p[0], cur[1] + p[1])
+                segs.append(("C", c1, c2, p))
+                cur, last_c, last_q = p, c2, None
+            elif c in "QT":
+                if c == "Q":
+                    q = (num(), num())
+                    if rel:
+                        q = (cur[0] + q[0], cur[1] + q[1])
+                else:
+                    q = (2 * cur[0] - last_q[0], 2 * cur[1] - last_q[1]) if last_q else cur
+                p = (num(), num())
+                if rel:
+                    p = (cur[0] + p[0], cur[1] + p[1])
+                segs.append(("C", (cur[0] + 2 / 3 * (q[0] - cur[0]), cur[1] + 2 / 3 * (q[1] - cur[1])),
+                             (p[0] + 2 / 3 * (q[0] - p[0]), p[1] + 2 / 3 * (q[1] - p[1])), p))
+                cur, last_q, last_c = p, q, None
+            elif c == "A":
+                rx, ry, rot = num(), num(), num()
+                large, sweep = flag(), flag()
+                p = (num(), num())
+                if rel:
+                    p = (cur[0] + p[0], cur[1] + p[1])
+                for c1, c2, q in _arc_curves(cur, rx, ry, math.radians(rot), large, sweep, p):
+                    segs.append(("C", c1, c2, q))
+                cur = p
+                last_c = last_q = None
+            else:
+                i += 1
+        except (IndexError, ValueError):
+            break                                           # bad data: keep what was read
+    finish()
+    return subs
+
+
+def _ellipse_subs(cx, cy, rx, ry):
+    kx, ky = rx * _KAPPA, ry * _KAPPA
+    p = [(cx + rx, cy), (cx, cy + ry), (cx - rx, cy), (cx, cy - ry)]
+    segs = [("C", (cx + rx, cy + ky), (cx + kx, cy + ry), p[1]), ("C", (cx - kx, cy + ry), (cx - rx, cy + ky), p[2]),
+            ("C", (cx - rx, cy - ky), (cx - kx, cy - ry), p[3]), ("C", (cx + kx, cy - ry), (cx + rx, cy - ky), p[0])]
+    return [(p[0], segs, True)]
+
+
+def _shape_subs(el, tag):
+    g = lambda k, d=0.0: _length(el.get(k)) if _length(el.get(k)) is not None else d
+    if tag == "path":
+        return _path_subs(el.get("d"))
+    if tag == "rect":
+        x, y, w, h = g("x"), g("y"), g("width"), g("height")
+        if w <= 0 or h <= 0:
+            return []
+        rx, ry = _length(el.get("rx")), _length(el.get("ry"))
+        rx, ry = (rx if rx is not None else ry or 0.0), (ry if ry is not None else rx or 0.0)
+        rx, ry = min(max(rx, 0), w / 2), min(max(ry, 0), h / 2)
+        if not rx or not ry:
+            return [((x, y), [("L", (x + w, y)), ("L", (x + w, y + h)), ("L", (x, y + h)), ("L", (x, y))], True)]
+        kx, ky = rx * (1 - _KAPPA), ry * (1 - _KAPPA)
+        segs = [("L", (x + w - rx, y)), ("C", (x + w - kx, y), (x + w, y + ky), (x + w, y + ry)),
+                ("L", (x + w, y + h - ry)), ("C", (x + w, y + h - ky), (x + w - kx, y + h), (x + w - rx, y + h)),
+                ("L", (x + rx, y + h)), ("C", (x + kx, y + h), (x, y + h - ky), (x, y + h - ry)),
+                ("L", (x, y + ry)), ("C", (x, y + ky), (x + kx, y), (x + rx, y))]
+        return [((x + rx, y), segs, True)]
+    if tag == "circle":
+        r = g("r")
+        return _ellipse_subs(g("cx"), g("cy"), r, r) if r > 0 else []
+    if tag == "ellipse":
+        rx, ry = g("rx"), g("ry")
+        return _ellipse_subs(g("cx"), g("cy"), rx, ry) if rx > 0 and ry > 0 else []
+    if tag == "line":
+        return [((g("x1"), g("y1")), [("L", (g("x2"), g("y2")))], False)]
+    if tag in ("polyline", "polygon"):
+        v = _nums(el.get("points"))
+        pts = list(zip(v[0::2], v[1::2]))
+        if len(pts) < 2:
+            return []
+        segs = [("L", p) for p in pts[1:]]
+        if tag == "polygon" and not _close_enough(pts[0], pts[-1]):
+            segs.append(("L", pts[0]))
+        return [(pts[0], segs, tag == "polygon" or _close_enough(pts[0], pts[-1]))]
+    return []
+
+
+def _color(v, st, ids):
+    """CSS color -> "#rrggbb", None for none / unknown."""
+    v = (v or "").strip()
+    if not v or v == "none" or v == "transparent":
+        return None
+    if v == "currentColor":
+        return _color(st.get("color", "black"), {}, ids)
+    m = re.match(r"url\(\s*['\"]?#([^)'\"]+)['\"]?\s*\)\s*(.*)", v)
+    if m:                                           # gradient / pattern: its first stop's color
+        ref = ids.get(m.group(1))
+        seen = set()
+        while ref is not None and id(ref) not in seen:
+            seen.add(id(ref))
+            stops = [s for s in ref if _local(s.tag) == "stop"]
+            if stops:
+                s = stops[0]
+                return _color(_decls(s.get("style")).get("stop-color") or s.get("stop-color") or "black", {}, ids)
+            href = ref.get(f"{{{XLINK_NS}}}href") or ref.get("href") or ""
+            ref = ids.get(href[1:]) if href.startswith("#") else None
+        return _color(m.group(2), st, ids) if m.group(2) else "#000000"
+    if v.startswith("#"):
+        h = v[1:]
+        if len(h) in (3, 4):
+            h = "".join(c * 2 for c in h[:3])
+        return "#" + h[:6].lower() if len(h) >= 6 and re.fullmatch(r"[0-9a-fA-F]+", h[:6]) else None
+    m = re.match(r"rgba?\(([^)]*)\)", v)
+    if m:
+        parts = [p.strip() for p in re.split(r"[,\s/]+", m.group(1)) if p.strip()]
+        if len(parts) >= 4 and float(parts[3].rstrip("%")) == 0:
+            return None
+        ch = [float(p[:-1]) / 100 * 255 if p.endswith("%") else float(p) for p in parts[:3]]
+        return "#%02x%02x%02x" % tuple(max(0, min(255, round(c))) for c in ch)
+    hexc = _CSS_COLORS.get(v.lower())
+    return "#" + hexc if hexc else None
+
+
+def _opacity(v):
+    try:
+        v = (v or "1").strip()
+        return float(v[:-1]) / 100 if v.endswith("%") else float(v)
+    except ValueError:
+        return 1.0
+
+
+def _load_svg_plain(raw):
+    root, w_in, h_in, sized, notes = _prepare_svg(raw, stand_in="Arial", as_tree=True)
+    vb = [float(v) for v in re.split(r"[\s,]+", root.get("viewBox", "").strip()) if v]
+    m0 = _viewport(vb, 0, 0, w_in, h_in, root.get("preserveAspectRatio"))
+    ids = {e.get("id"): e for e in root.iter() if e.get("id")}
+    items, skipped = [], set()
+
+    def style_of(el, inherited):
+        st = dict(inherited)
+        own = {k: el.get(k) for k in _INHERITED + ("opacity", "display") if el.get(k) is not None}
+        own.update({k: v for k, v in _decls(el.get("style")).items()})
+        for k, v in own.items():
+            if v != "inherit":
+                st[k] = v
+        st["_opacity"] = inherited.get("_opacity", 1.0) * _opacity(own.get("opacity"))
+        return st
+
+    def shape(el, tag, m, st):
+        subs = _shape_subs(el, tag)
+        if not subs or st.get("visibility") in ("hidden", "collapse"):
+            return
+        op = st["_opacity"]
+        fill = _color(st.get("fill", "black"), st, ids)
+        stroke = _color(st.get("stroke", "none"), st, ids)
+        if fill and (op * _opacity(st.get("fill-opacity")) <= 0 or tag in ("line",)):
+            fill = None
+        if stroke and op * _opacity(st.get("stroke-opacity")) <= 0:
+            stroke = None
+        sw = _length(st.get("stroke-width", "1")) if stroke else 0.0
+        sw = 1.0 if sw is None else sw                      # (percent widths: not supported)
+        if stroke and not sw:
+            stroke = None
+        if not stroke and not fill:
+            return
+        tf = lambda p: (m[0] * p[0] + m[2] * p[1] + m[4], m[1] * p[0] + m[3] * p[1] + m[5])
+        subs = [(tf(s), [(q[0],) + tuple(tf(p) for p in q[1:]) for q in segs], c) for s, segs, c in subs]
+        subs = [s for s in subs if s[1]]
+        if not subs:
+            return
+        if fill and sum(abs(_area(flatten(s, 0.01))) for s in subs) < 1e-7:
+            fill = None                 # a plain line: the default black fill paints nothing
+            if not stroke:
+                return
+        scale = math.sqrt(abs(m[0] * m[3] - m[1] * m[2]))
+        caps = {"butt": 0, "round": 1, "square": 2}
+        joins = {"miter": 0, "miter-clip": 0, "arcs": 0, "round": 1, "bevel": 2}
+        items.append({"stroke": stroke, "fill": fill, "width_in": (sw or 0.0) * scale if stroke else 0.0,
+                      "evenodd": (st.get("fill-rule") or "").strip() == "evenodd", "subs": subs,
+                      "cap": caps.get((st.get("stroke-linecap") or "butt").strip(), 0),
+                      "join": joins.get((st.get("stroke-linejoin") or "miter").strip(), 0)})
+
+    def walk(el, m, inherited, depth=0):
+        if depth > 50 or not isinstance(el.tag, str) or not el.tag.startswith(f"{{{SVG_NS}}}"):
+            return
+        tag = _local(el.tag)
+        st = style_of(el, inherited)
+        if st.get("display") == "none":
+            return
+        m = _mat_mul(m, _transform(el.get("transform")))
+        if tag in ("g", "a", "switch"):
+            for c in el:
+                walk(c, m, st, depth + 1)
+        elif tag == "svg":                                    # nested viewport
+            x, y = _length(el.get("x")) or 0.0, _length(el.get("y")) or 0.0
+            box = [float(v) for v in re.split(r"[\s,]+", el.get("viewBox", "").strip()) if v]
+            w, h = _length(el.get("width")), _length(el.get("height"))
+            if len(box) == 4:
+                m = _mat_mul(m, _viewport(box, x, y, w or box[2], h or box[3], el.get("preserveAspectRatio")))
+            else:
+                m = _mat_mul(m, (1, 0, 0, 1, x, y))
+            for c in el:
+                walk(c, m, st, depth + 1)
+        elif tag == "use":
+            href = el.get(f"{{{XLINK_NS}}}href") or el.get("href") or ""
+            ref = ids.get(href[1:]) if href.startswith("#") else None
+            if ref is None:
+                return
+            m = _mat_mul(m, (1, 0, 0, 1, _length(el.get("x")) or 0.0, _length(el.get("y")) or 0.0))
+            if _local(ref.tag) == "symbol":
+                rst = style_of(ref, st)
+                box = [float(v) for v in re.split(r"[\s,]+", ref.get("viewBox", "").strip()) if v]
+                if len(box) == 4:
+                    w = _length(el.get("width")) or _length(ref.get("width")) or box[2]
+                    h = _length(el.get("height")) or _length(ref.get("height")) or box[3]
+                    m = _mat_mul(m, _viewport(box, 0, 0, w, h, ref.get("preserveAspectRatio")))
+                for c in ref:
+                    walk(c, m, rst, depth + 1)
+            else:
+                walk(ref, m, st, depth + 1)
+        elif tag in ("path", "rect", "circle", "ellipse", "line", "polyline", "polygon"):
+            shape(el, tag, m, st)
+        elif tag in ("text", "marker") or (tag not in _NOT_DRAWN and tag != "stop"):
+            if tag in ("text", "marker"):
+                skipped.add(tag)
+
+    root_style = style_of(root, {"_opacity": 1.0})
+    for c in root:
+        walk(c, m0, root_style)
+    if "text" in skipped:
+        notes.append("Some text couldn't be converted to outlines and was left out.")
+    if "marker" in skipped or any(_local(e.tag) == "marker" for e in root.iter()):
+        notes.append("Line-end markers (arrowheads) aren't imported.")
+    if any(_local(e.tag) in ("linearGradient", "radialGradient", "pattern") for e in root.iter()):
+        notes.append("Gradients and patterns are taken as one solid color.")
+    return {"kind": "svg", "w_in": w_in, "h_in": h_in, "sized": sized, "items": items, "notes": notes}
 
 
 # --- text -> outlines --------------------------------------------------------
@@ -487,7 +963,7 @@ def _font_size(el, parent):
     return size
 
 
-def _font_for(el, parent):
+def _font_for(el, parent, stand_in=None):
     import design as D
     installed = D.fonts()
     lower = {k.lower(): k for k in installed}
@@ -498,6 +974,8 @@ def _font_for(el, parent):
         if key:
             family = key
             break
+    if family is None and stand_in:
+        family = lower.get(stand_in.lower())
     if family is None:
         raise LookupError("font not installed")
     weight = (_prop(el, "font-weight", parent, "normal") or "normal").lower()
@@ -515,9 +993,9 @@ def _nums(v):
     return [float(x) for x in re.findall(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?", v or "")]
 
 
-def _text_to_path(text_el, parent):
+def _text_to_path(text_el, parent, stand_in=None):
     """Replaces a <text> element with a <g> of outline <path>s (installed fonts, fontTools).
-    Returns False (and leaves it) for text on a path."""
+    Returns False (and leaves it) for text on a path. stand_in: font for missing families."""
     import vectors
     from fontTools.pens.svgPathPen import SVGPathPen
     from fontTools.pens.transformPen import TransformPen
@@ -576,7 +1054,7 @@ def _text_to_path(text_el, parent):
         pen_y += dy
         if not s:
             continue
-        path, family, style = _font_for(el, parent)
+        path, family, style = _font_for(el, parent, stand_in)
         font = vectors._ttfont(path, family, style)
         size = _font_size(el, parent)
         k = size / font["head"].unitsPerEm
