@@ -194,8 +194,9 @@ def design_init(manifest_json):
     D._FONTS = found
     _design["layout"] = D.Renderer(draft=True)
     _design["full"] = D.Renderer(limit=24)
-    return json.dumps({"fonts": font_list(), "draft_dpi": D.DRAFT_DPI,
-                       "types": D.TYPE_LABELS, "ops": list(D.OPS)})
+    return json.dumps({"fonts": font_list(), "aliases": m.get("aliases", {}), "draft_dpi": D.DRAFT_DPI,
+                       "types": D.TYPE_LABELS, "ops": list(D.OPS),
+                       "layer_fields": list(D.LAYER_SETTING_FIELDS), "global_fields": list(D.GLOBAL_FIELDS)})
 
 
 def font_list():

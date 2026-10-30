@@ -6,19 +6,25 @@
 <title>Laser Engraver</title>
 <meta name="description" content="Turn photos into laser engraving files in your browser. Nothing is uploaded.">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
-<!-- ?v= makes browsers fetch a fresh copy after an update: bump it (all three, same number)
-     whenever style.css, app.js, tour.js or worker.js change. -->
-<link rel="stylesheet" href="style.css?v=6">
+<!-- ?v= makes browsers fetch a fresh copy after an update: bump it (all four, same number)
+     whenever style.css, app.js, design.js, tour.js or worker.js change. -->
+<link rel="stylesheet" href="style.css?v=7">
 </head>
 <body>
 <header class="topbar">
-  <div class="brand"><img src="icon.svg" alt="" width="22" height="22"> Laser Engraver <span class="badge">web</span></div>
+  <div class="brand"><img src="icon.svg" alt="" width="22" height="22"> Laser Engraver <span class="badge">web</span>
+    <div class="seg mode" id="modeSeg" role="radiogroup">
+      <button data-mode="photos" class="active" title="One photo at a time: photo or comic style">Photos</button>
+      <button data-mode="design" title="Lay out photos, logos, text and shapes on one engraving">Design</button>
+    </div>
+  </div>
   <div class="actions">
-    <label class="btn primary" id="openBtn" title="Open photos (or drop them anywhere on the page)">
+    <label class="btn primary photos-only" id="openBtn" title="Open photos (or drop them anywhere on the page)">
       Open photos<input id="fileInput" type="file" accept="image/*" multiple hidden>
     </label>
-    <button id="downloadBtn" class="btn" disabled title="Download the engraving PNG for the selected photo">Download PNG</button>
-    <button id="downloadAllBtn" class="btn" disabled title="Download engravings for every open photo">Download all</button>
+    <button id="downloadBtn" class="btn photos-only" disabled title="Download the engraving PNG for the selected photo">Download PNG</button>
+    <button id="downloadAllBtn" class="btn photos-only" disabled title="Download engravings for every open photo">Download all</button>
+    <button id="newDesignBtn" class="btn design-only" title="Start a new, empty design">New design</button>
     <span class="sep"></span>
     <button id="themeBtn" class="btn ghost" title="Light / dark theme">◐</button>
     <button id="tourBtn" class="btn ghost" title="A guided tour of the tools, with a sample photo">Tutorial</button>
@@ -28,17 +34,48 @@
 
 <div class="layout">
   <aside class="side">
-    <section class="files">
+    <section class="files photos-only">
       <div class="files-head"><span>Photos</span><button id="clearBtn" class="link" hidden>Clear all</button></div>
       <ul id="fileList" class="file-list"></ul>
       <p id="filesEmpty" class="hint">No photos yet. Use <b>Open photos</b> or drop them here.</p>
     </section>
+    <section class="files layers design-only">
+      <div class="files-head"><span>Layers <span class="hint">(top first)</span></span></div>
+      <ul id="layerList" class="file-list layer-list"></ul>
+      <p id="layersEmpty" class="hint">Nothing yet. Use <b>Add</b> to put a photo, logo, text or shape on the canvas.</p>
+      <div class="layer-btns">
+        <div class="menu-wrap">
+          <button class="btn sm primary" id="addBtn" type="button" aria-haspopup="menu">Add ▾</button>
+          <div class="menu" id="addMenu" role="menu" hidden>
+            <button data-add="image" role="menuitem">Photo…</button>
+            <button data-add="logo" role="menuitem">Logo / clip art (PNG)…</button>
+            <hr>
+            <button data-add="text" role="menuitem">Text</button>
+            <button data-add="arctext" role="menuitem">Arc text</button>
+            <hr>
+            <button data-add="rect" role="menuitem">Rectangle (drag to draw)</button>
+            <button data-add="ellipse" role="menuitem">Circle / ellipse (drag to draw)</button>
+            <button data-add="line" role="menuitem">Line (drag to draw)</button>
+          </div>
+          <input id="artInput" type="file" accept="image/*" hidden>
+        </div>
+        <button class="btn sm" id="layerUp" type="button" title="Bring forward">▲</button>
+        <button class="btn sm" id="layerDown" type="button" title="Send backward">▼</button>
+        <button class="btn sm" id="layerCopy" type="button" title="Duplicate (Ctrl+D)">Copy</button>
+        <button class="btn sm" id="layerHide" type="button" title="Hide / show">Hide</button>
+        <button class="btn sm" id="layerDel" type="button" title="Delete (Del)">Delete</button>
+      </div>
+    </section>
     <nav class="tabs" role="tablist">
+      <button class="tab" data-tab="design" role="tab" hidden>Design</button>
+      <button class="tab" data-tab="layer" role="tab" hidden>Layer</button>
       <button class="tab active" data-tab="basic" role="tab">Basic</button>
       <button class="tab" data-tab="photo" role="tab">Photo tuning</button>
       <button class="tab" data-tab="comic" role="tab">Comic tuning</button>
     </nav>
     <div class="panes">
+      <div class="pane" id="pane-design"></div>
+      <div class="pane" id="pane-layer"></div>
       <div class="pane active" id="pane-basic"></div>
       <div class="pane" id="pane-photo"></div>
       <div class="pane" id="pane-comic"></div>
@@ -47,6 +84,10 @@
 
   <main class="main">
     <div class="viewbar">
+      <div class="seg design-only" id="designViews" role="radiogroup">
+        <button data-view="layout" title="Fast view for arranging: photos are shown as plain pictures, without the engraving processing">Layout</button>
+        <button data-view="design" title="The real engraving of the whole design, in the material's colors">Design</button>
+      </div>
       <div class="seg" id="views" role="radiogroup">
         <button data-view="original">Original</button>
         <button data-view="cutout" id="cutoutBtn" hidden title="The photo with removed areas tinted red. Paint fixes here.">Cut-out</button>
@@ -54,7 +95,7 @@
         <button data-view="engraving" class="active">Engraving</button>
         <button data-view="look">Material look</button>
       </div>
-      <label class="check" title="Show the original photo left of a divider that follows the mouse">
+      <label class="check" id="compareLbl" title="Show the original photo left of a divider that follows the mouse">
         <input type="checkbox" id="compare"> Compare</label>
       <div class="zoom">
         <button class="btn ghost sm" id="zoomOut" title="Zoom out">−</button>
@@ -80,6 +121,8 @@
     <div class="stage" id="stage">
       <canvas id="canvas"></canvas>
       <div id="drop" class="drop">Drop photos to open them</div>
+      <div id="designEmpty" class="design-hint" hidden>Use <b>Add</b> (left) to put a photo, logo, text or shape on the canvas,
+        or drop photos here.</div>
       <div id="empty" class="empty">
         <h2>Photos to laser engravings, in your browser</h2>
         <p>Open a photo to start. Everything runs on this computer: <b>nothing is uploaded</b>.</p>
@@ -97,8 +140,8 @@
   <span id="status">Starting…</span>
   <div class="bar" id="bar" hidden><div></div></div>
   <span class="grow"></span>
-  <span id="estimate" class="muted"></span>
-  <label class="speed" title="Your laser's engraving speed, for the time estimate">Speed
+  <span id="estimate" class="muted photos-only"></span>
+  <label class="speed photos-only" title="Your laser's engraving speed, for the time estimate">Speed
     <input id="speed" type="number" min="1" max="2000" step="10" value="300"> mm/s</label>
 </footer>
 
@@ -163,7 +206,8 @@
   </form>
 </dialog>
 
-<script src="app.js?v=6"></script>
-<script src="tour.js?v=6"></script>
+<script src="app.js?v=7"></script>
+<script src="design.js?v=7"></script>
+<script src="tour.js?v=7"></script>
 </body>
 </html>

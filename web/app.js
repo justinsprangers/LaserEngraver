@@ -75,6 +75,10 @@ let views = null, viewCache = {};
 let view = LS.get("view", "engraving");
 let modelCached = false;
 const controls = [];         // {key, set(value)} to refresh inputs from S
+// Design mode (design.js fills this in). While it's active, S holds the design's settings and
+// the selected photo layer's, so Photos-mode settings are kept aside and not saved over.
+const DM = { active: false, shown: () => false };
+function saveSettings() { if (!DM.active) LS.set("settings", S); }
 
 // ============================================================ status
 
@@ -327,7 +331,7 @@ function change(key, value) {
   refreshHints();
   refreshFixbar();
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => LS.set("settings", S), 400);
+  saveTimer = setTimeout(saveSettings, 400);
   scheduleRender();
 }
 
@@ -422,7 +426,7 @@ function saveMaterial() {
   storeMaterials();
   S.material = name;
   refreshControls();
-  LS.set("settings", S);
+  saveSettings();
   setStatus(`Saved material '${name}' in this browser`);
 }
 function renameMaterial() {
@@ -435,7 +439,7 @@ function renameMaterial() {
   storeMaterials();
   S.material = name;              // same settings, new name
   refreshControls();
-  LS.set("settings", S);
+  saveSettings();
   scheduleRender();
 }
 function deleteMaterial() {
@@ -477,7 +481,7 @@ function applyPreset(style, name) {
   if (!vals) return;
   Object.assign(S, vals);
   LS.set(`preset-${style}`, name);
-  LS.set("settings", S);
+  saveSettings();
   refreshControls();
   scheduleRender();
 }
@@ -520,6 +524,7 @@ function deletePreset(style) {
 // ============================================================ files
 
 async function openFiles(list) {
+  if (DM.active) return DM.addFiles(list);           // Design mode: dropped photos become layers
   const images = [...list].filter((f) => f.type.startsWith("image/") || /\.(png|jpe?g|bmp|webp|tiff?)$/i.test(f.name));
   if (!images.length) return;
   let first = null;
@@ -556,7 +561,7 @@ function renderFileList() {
   $("#clearBtn").hidden = files.length < 2;
   $("#downloadBtn").disabled = !current;
   $("#downloadAllBtn").disabled = files.length < 2;
-  $("#empty").hidden = files.length > 0;
+  $("#empty").hidden = files.length > 0 || DM.active;
 }
 
 function selectFile(f) {
@@ -593,6 +598,11 @@ function closeFile(f) {
 
 let renderTimer = null, busy = false, again = false, needFit = true;
 function scheduleRender(delay = 220) {
+  if (DM.active) {
+    DM.settingsChanged();                         // settings -> the design / its photo layer
+    if (!(current && PHOTO_VIEWS.includes(view))) { DM.photoStale = true; return; }
+    DM.photoStale = false;
+  }
   clearTimeout(renderTimer);
   renderTimer = setTimeout(renderNow, delay);
 }
@@ -613,7 +623,7 @@ async function renderNow() {
     if (f === current) {
       views = r;
       viewCache = {};
-      if (needFit) fit();
+      if (needFit && !DM.shown()) fit();
       draw();
       updateInfo();
       setStatus(`Ready (${((performance.now() - t0) / 1000).toFixed(1)} s)`);
@@ -695,6 +705,7 @@ function viewCanvas(name) {
 }
 
 function draw() {
+  if (DM.shown()) return DM.draw();
   const dpr = window.devicePixelRatio || 1;
   const W = canvas.clientWidth, H = canvas.clientHeight;
   if (canvas.width !== Math.round(W * dpr) || canvas.height !== Math.round(H * dpr)) {
@@ -735,6 +746,7 @@ function draw() {
 }
 
 function fit() {
+  if (DM.shown()) return DM.fit();
   if (!views) return;
   const W = canvas.clientWidth, H = canvas.clientHeight, { w, h } = viewSize();
   if (!W || !H) { needFit = true; return; }      // not laid out yet (hidden): fit when shown
@@ -828,6 +840,7 @@ $("#undoBtn").addEventListener("click", undoStroke);
 $("#clearFixBtn").addEventListener("click", clearStrokes);
 brush.addEventListener("input", () => { LS.set("brush", +brush.value); draw(); });
 function zoomAt(sx, sy, factor) {
+  if (DM.shown()) return DM.zoomAt(sx, sy, factor);
   const nz = Math.min(64, Math.max(0.02, zoom * factor));
   panX = sx - (sx - panX) * (nz / zoom);
   panY = sy - (sy - panY) * (nz / zoom);
@@ -843,6 +856,7 @@ canvas.addEventListener("wheel", (e) => {
 let drag = null;
 canvas.addEventListener("contextmenu", (e) => e.preventDefault());
 canvas.addEventListener("pointerdown", (e) => {
+  if (DM.shown()) return DM.pointerdown(e);
   canvas.setPointerCapture(e.pointerId);
   const r = canvas.getBoundingClientRect(), sx = e.clientX - r.left, sy = e.clientY - r.top;
   if (e.button === 0 && !spaceDown && drawing()) {
@@ -854,6 +868,7 @@ canvas.addEventListener("pointerdown", (e) => {
   canvas.classList.add("panning");
 });
 canvas.addEventListener("pointermove", (e) => {
+  if (DM.shown()) return DM.pointermove(e);
   const r = canvas.getBoundingClientRect(), sx = e.clientX - r.left, sy = e.clientY - r.top;
   mouseX = sx;
   mouse = [sx, sy];
@@ -869,6 +884,7 @@ canvas.addEventListener("pointermove", (e) => {
   if (live || drag || $("#compare").checked || drawing()) draw();
 });
 canvas.addEventListener("pointerup", () => {
+  if (DM.shown()) return DM.pointerup();
   if (live) {
     current.strokes.push([live.kind, brushRadius(), live.pts]);
     live = null;
@@ -878,22 +894,34 @@ canvas.addEventListener("pointerup", () => {
   canvas.classList.remove("panning");
 });
 canvas.addEventListener("pointerleave", () => { mouseX = null; mouse = null; draw(); });
-canvas.addEventListener("dblclick", fit);
-new ResizeObserver(() => (needFit && views ? fit() : draw())).observe(canvas);
+canvas.addEventListener("dblclick", () => { if (!DM.shown()) fit(); });
+new ResizeObserver(() => (DM.shown() ? DM.resized() : needFit && views ? fit() : draw())).observe(canvas);
 
 $("#zoomFit").addEventListener("click", fit);
 $("#zoomIn").addEventListener("click", () => zoomAt(canvas.clientWidth / 2, canvas.clientHeight / 2, 1.25));
 $("#zoomOut").addEventListener("click", () => zoomAt(canvas.clientWidth / 2, canvas.clientHeight / 2, 0.8));
-$("#zoom100").addEventListener("click", () => zoomAt(canvas.clientWidth / 2, canvas.clientHeight / 2, 1 / (window.devicePixelRatio || 1) / zoom));
+$("#zoom100").addEventListener("click", () => DM.shown() ? DM.zoom100() : zoomAt(canvas.clientWidth / 2, canvas.clientHeight / 2, 1 / (window.devicePixelRatio || 1) / zoom));
 $("#compare").addEventListener("change", draw);
 
 function setView(v) {
   if (v === "cutout" && !S.remove_bg) v = "engraving";
-  const refit = (v === "cutout") !== (view === "cutout");   // different framing: fit again
+  if (DM.active && !current && !["layout", "design"].includes(v)) v = "layout";   // photo views need a photo layer
+  const wasDesign = DM.shown();
+  // Different framing: fit again (Cut-out is the uncropped photo; Layout / Design the canvas).
+  const refit = (v === "cutout") !== (view === "cutout") || wasDesign;
   view = v;
-  if (v !== "cutout") LS.set("view", v);
-  for (const b of document.querySelectorAll("#views button")) b.classList.toggle("active", b.dataset.view === v);
+  if (DM.active) LS.set("dview", v); else if (v !== "cutout") LS.set("view", v);
+  for (const b of document.querySelectorAll("#views button, #designViews button")) b.classList.toggle("active", b.dataset.view === v);
+  $("#compareLbl").hidden = DM.shown();
   if (v !== "cutout" && tool !== "pan") setTool("pan");
+  if (DM.shown()) return DM.onShown();
+  canvas.style.cursor = "";
+  if (DM.active) {
+    $("#designEmpty").hidden = true;
+    if (wasDesign) needFit = true;
+    if (DM.photoStale || !views) return scheduleRender(0);
+    updateInfo();
+  }
   if (refit && views) fit(); else draw();
 }
 for (const b of document.querySelectorAll("#views button")) b.addEventListener("click", () => setView(b.dataset.view));
@@ -954,7 +982,7 @@ for (const t of document.querySelectorAll(".tab")) {
   t.addEventListener("click", () => {
     for (const x of document.querySelectorAll(".tab")) x.classList.toggle("active", x === t);
     for (const p of document.querySelectorAll(".pane")) p.classList.toggle("active", p.id === `pane-${t.dataset.tab}`);
-    LS.set("tab", t.dataset.tab);
+    LS.set(DM.active ? "dtab" : "tab", t.dataset.tab);
   });
 }
 
@@ -979,6 +1007,7 @@ speed.addEventListener("change", () => { LS.set("speed", +speed.value); updateEs
 // Same keys as the desktop app's defaults where they exist.
 window.addEventListener("keydown", (e) => {
   if (e.target instanceof Element && e.target.matches("input[type=number], input[type=text], select, textarea")) return;
+  if (DM.active && DM.key(e)) return;
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { e.preventDefault(); undoStroke(); return; }
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   const viewKeys = { "1": "original", "2": "adjusted", "3": "engraving", "4": "look", "5": "cutout" };
@@ -1014,6 +1043,8 @@ window.addEventListener("keyup", (e) => {
     buildBasic($("#pane-basic"));
     buildPhoto($("#pane-photo"));
     buildComic($("#pane-comic"));
+    // Photos mode only: photo layers have their own crop (Layer tab) and are sized by width.
+    for (const e of [$("#cropSection"), $("#heightHint").closest(".row"), $('[data-sec="extras"]')]) e.classList.add("photos-only");
     refreshPresetLists();
     refreshControls();
     const tab = document.querySelector(`.tab[data-tab="${LS.get("tab", "basic")}"]`);
@@ -1026,6 +1057,7 @@ window.addEventListener("keyup", (e) => {
     $("#loading").classList.add("hidden");
     renderFileList();
     setStatus("Ready. Open photos to start.");
+    if (LS.get("mode", "photos") === "design") await DM.enter();
     window.dispatchEvent(new Event("le-ready"));          // tour.js offers the tour on a first visit
   } catch (e) {
     $("#loadText").textContent = `Couldn't start: ${e.message}. Check your internet connection and reload the page.`;

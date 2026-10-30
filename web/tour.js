@@ -185,6 +185,7 @@
   }
 
   function start() {
+    if (DM.active) DM.leave();           // the tour shows Photos mode
     if (!dim) build();
     const help = q("#help");
     if (help.open) help.close();

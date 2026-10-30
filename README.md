@@ -14,7 +14,8 @@ There are two versions that share the same processing code (`engrave_core.py`):
 - **Web version** (`web/`): runs in any modern browser with nothing to install, for sharing
   (e.g. a makerspace). Photo and comic styles, AI background removal with the same fix tools
   (smart keep / remove, brush keep / erase), presets, materials and PNG / outline downloads.
-  No Design mode yet. Photos are processed on the viewer's own computer, never uploaded.
+  Design mode is being added (layouts work; saving files from it doesn't yet). Photos are
+  processed on the viewer's own computer, never uploaded.
 
 ## Web version
 
@@ -49,15 +50,18 @@ How it works:
   control in the order you'd use it (the page stays usable underneath) and can load a sample
   photo (`web/samples/`), which it closes again at the end. To change the wording or order, edit
   the `STEPS` list in `tour.js`.
-- After changing `style.css`, `app.js`, `tour.js` or `worker.js`, bump the `?v=` number in
-  `web/index.html` (all three links), so browsers load the new files instead of a cached copy.
+- After changing `style.css`, `app.js`, `design.js`, `tour.js` or `worker.js`, bump the `?v=`
+  number in `web/index.html` (all four links), so browsers load the new files instead of a cached copy.
 - Presets, your own materials, settings and theme are saved in the browser (localStorage). The
   built-in materials (`materials.json`) can't be renamed, deleted or overwritten in the web
   version, so a shared computer always has the originals; **Save as…** makes a personal copy.
 - The interface (`web/index.html`, `app.js`, `style.css`) is separate from the desktop's, so
   new interface features have to be added to each version.
-- **Design mode (in progress):** the browser already runs the desktop's design engine
-  (`design.py`, `vectors.py`) through `web/engine.py`; the Design-mode screens come next.
+- **Design mode (in progress):** **Photos | Design** at the top left. The browser runs the
+  desktop's design engine (`design.py`, `vectors.py`) through `web/engine.py`; the screens are
+  in `web/design.js` and work like the desktop's: add photos, logos, text, arc text and drawn
+  shapes, move / resize / rotate them with snapping, Layout and Design views, undo. Not yet:
+  saving the engraving and cut files, Engrave / Score / Cut choices, project files, vector files.
   Fonts: browsers can't hand Python your installed fonts, so the web version uses the
   open-licence fonts in `web/fonts/` (made by `python web/tools/make_fonts.py`; add a family
   to its list and run it again). Arial, Times New Roman and Courier New in desktop projects use
