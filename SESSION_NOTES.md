@@ -19,7 +19,7 @@
 ## Decisions & gotchas
 - See `CLAUDE.md` for the pixel-identical rule, cache-version bumps, vector-file pipeline and testing constraints.
 - Frame color moved from blue to green: blue = score (Ruby / xTool / LightBurn convention).
-- MuPDF alone mis-reads SVGs (no CSS classes, no display:none, px at 72 DPI, built-in fonts), hence `vecfile._prepare_svg`.
+- MuPDF alone mis-reads SVGs (no CSS classes, no display:none, px at 72 DPI, built-in fonts), hence `vecfile._prepare_svg`. 2026-10-30: user chose to keep MuPDF on the desktop and patch its input (`_fix_for_mupdf`) rather than switch to the plain reader, which would have changed gradients, text on a path, missing-font text and Break-apart item numbering. User approved the output change (3 of 23 Inkscape examples differ, all now matching the web reader).
 - Old projects keep their output: `_with_defaults` converts `cut` → `op`, old SVG layers keep page-sized boxes and threshold jobs. Verified against the v1.10 renderer: photos/text/logos/shapes pixel-identical, SVG strokes differ only at edges/corners.
 - New dependencies: shapely, ezdxf (requirements.txt, PyInstaller spec collects ezdxf data).
 - Public repo: keep personal photos, settings, and private scripts out.
@@ -27,6 +27,7 @@
 - JPEG photos aren't pixel-identical between browser and desktop (libjpeg 9 vs libjpeg-turbo); PNGs are. Affects Photos mode too (found 2026-10-29).
 
 ## Log
+- 2026-10-30: Desktop SVG: patch what MuPDF misreads (fill-rule/opacity in style, units, currentColor, visibility, nested svg, symbol sizes, rounded rects)
 - 2026-10-30: Web Design mode phase 4: SVG without MuPDF (vecfile._load_svg_plain), DXF via ezdxf wheel, vector panel
 - 2026-10-30: Web Design mode phase 3: export, .lep open/save, IndexedDB autosave, plain PDF writer, full-DPI zoom detail, size warning
 - 2026-10-30: Web Design mode phase 2: Design UI (design.js); page composite = exported PNG dot for dot

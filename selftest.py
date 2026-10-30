@@ -44,6 +44,7 @@ def selftest(report_path):
             f.write('<svg xmlns="http://www.w3.org/2000/svg" width="1in" height="1in" viewBox="0 0 10 10">'
                     '<style>.c{fill:none;stroke:#ff0000;stroke-width:0.01}</style>'
                     '<circle cx="5" cy="5" r="4" fill="black"/><rect class="c" x="1" y="1" width="8" height="8"/>'
+                    '<path style="fill:#000;fill-rule:evenodd" d="M0 0h2v2h-2z M.5 .5h1v1h-1z"/>'
                     '<text x="5" y="9" font-family="Arial" font-size="2" text-anchor="middle">Hi</text></svg>')
         import ezdxf
         dxf = os.path.join(here, "selftest.dxf")
@@ -55,6 +56,8 @@ def selftest(report_path):
         sdoc, ddoc = V.load(svg), V.load(dxf)
         if [D.vector_jobs({"jobs": {}}, sdoc).get(k) for k in ("s:#ff0000", "f:#000000")] != ["cut", "engrave"]:
             raise RuntimeError(f"SVG colors read wrong: {D.vector_jobs({'jobs': {}}, sdoc)}")
+        if not any(it["evenodd"] for it in sdoc["items"]):
+            raise RuntimeError("SVG fill-rule inside style=\"\" ignored (vecfile._fix_for_mupdf)")
         if abs(ddoc["w_in"] * 25.4 - 20) > 0.01:
             raise RuntimeError(f"DXF size read wrong: {ddoc['w_in'] * 25.4} mm")
         d = D.new_design("wood", 3, 3)

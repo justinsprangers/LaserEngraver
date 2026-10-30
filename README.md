@@ -324,6 +324,12 @@ default) and DXF files.
 - **Text** inside SVGs is converted with your installed fonts (bold / italic, alignment,
   multi-line). PDF text and SVG text in fonts you don't have are converted with a stand-in font
   (the Layer tab says so). DXF text uses ezdxf's fonts.
+- **SVG details** are read the way Inkscape and browsers draw them: even-odd fill rules,
+  invisible (fully transparent) fills and lines, line widths in pt / mm, `currentColor`, hidden
+  items, nested drawings, resized symbols and rounded-rectangle corners. (The desktop app
+  rewrites these before PyMuPDF reads the file, because PyMuPDF misreads them; the web version
+  has its own reader.) Gradients come in as one solid color: black on the desktop, the first
+  gradient color on the web.
 - **Not imported** (the Layer tab lists what applies to the file): pictures inside a vector
   file (add them as Photo layers), clipping masks (the hidden parts come in too), text along a
   path, old Inkscape flowed text, DXF points. Dashed lines come in solid. Only the first page

@@ -18,7 +18,10 @@ the usual laser convention (red lines cut, blue lines score, dark fills engrave)
 SVG: MuPDF draws the file, but it doesn't read CSS <style> classes, display:none, or 96-DPI
 px sizes, and draws text with built-in fonts. _prepare_svg() fixes all of that first: it
 inlines CSS, drops hidden elements, writes the real size into the root, and turns <text> into
-outlines with the installed fonts (fontTools). PDF/AI: MuPDF directly. DXF: ezdxf.
+outlines with the installed fonts (fontTools), and _fix_for_mupdf() rewrites SVG that MuPDF
+misreads (style-only fill rules / opacity, units, currentColor, visibility, nested viewports,
+sized symbols, rounded rects). PDF/AI: MuPDF directly. DXF: ezdxf. Without PyMuPDF (the web
+version) SVGs are read by _load_svg_plain().
 """
 
 import math
@@ -218,7 +221,7 @@ def _load_mupdf(path, ext):
     if ext == ".svg":
         with open(path, "rb") as f:
             raw = f.read()
-        data, w_in, h_in, sized, notes = _prepare_svg(raw)
+        data, w_in, h_in, sized, notes = _prepare_svg(raw, mupdf=True)
         doc = pymupdf.open(stream=data, filetype="svg")
         kind = "svg"
     else:
@@ -378,10 +381,11 @@ def _css_rules(root):
     return rules
 
 
-def _prepare_svg(raw, stand_in=None, as_tree=False):
+def _prepare_svg(raw, stand_in=None, as_tree=False, mupdf=False):
     """Returns (svg bytes for MuPDF, width in, height in, sized, notes). stand_in: a font for
     text whose fonts aren't installed (else such text is left for MuPDF to convert); as_tree:
-    return the prepared root element instead of bytes."""
+    return the prepared root element instead of bytes; mupdf: also rewrite what MuPDF misreads
+    (_fix_for_mupdf)."""
     notes = []
     try:
         _register_namespaces(raw)
@@ -463,7 +467,125 @@ def _prepare_svg(raw, stand_in=None, as_tree=False):
             parent[el].remove(el)
     if flow:
         notes.append("Flowed text (old Inkscape text boxes) was skipped: convert it to paths first.")
+    if mupdf:
+        _fix_for_mupdf(root)
     return (root if as_tree else ET.tostring(root)), w_in, h_in, sized, notes
+
+
+_SHAPES = ("path", "rect", "circle", "ellipse", "line", "polyline", "polygon")
+_STYLE_TO_ATTR = ("fill-rule", "clip-rule", "fill-opacity", "stroke-opacity", "opacity", "stroke-width")
+
+
+def _fix_for_mupdf(root):
+    """Rewrites SVG that MuPDF misreads into a form it reads the way browsers / Inkscape draw it
+    (and like _load_svg_plain): fill-rule / opacities / stroke-width inside style="" (ignored)
+    -> attributes; stroke-width units (dropped) -> px; currentColor and visibility (ignored) ->
+    resolved; nested <svg> x/y (ignored) -> a translate; <use> width/height on a <symbol>
+    (ignored) -> a sized nested <svg> copy; rounded rects (corners drawn off a true circle) ->
+    paths."""
+    import copy
+    ids = {e.get("id"): e for e in root.iter() if e.get("id")}
+    svg = lambda tag: f"{{{SVG_NS}}}{tag}"
+    for _ in range(10):                                   # symbols may use other symbols
+        parent = {c: p for p in root.iter() for c in p}
+        changed = False
+        for use in [e for e in root.iter() if _local(e.tag) == "use"]:
+            href = use.get(f"{{{XLINK_NS}}}href") or use.get("href") or ""
+            ref = ids.get(href[1:]) if href.startswith("#") else None
+            box = [float(v) for v in re.split(r"[\s,]+", ref.get("viewBox", "").strip()) if v] \
+                if ref is not None and _local(ref.tag) == "symbol" else []
+            if len(box) != 4 or (use.get("width") is None and use.get("height") is None) or use not in parent:
+                continue
+            w = _length(use.get("width")) or _length(ref.get("width")) or box[2]
+            h = _length(use.get("height")) or _length(ref.get("height")) or box[3]
+            g = ET.Element(svg("g"), {k: v for k, v in use.attrib.items() if k not in
+                                      ("x", "y", "width", "height", "href", f"{{{XLINK_NS}}}href")})
+            g.set("transform", f"{use.get('transform') or ''} translate({_length(use.get('x')) or 0.0:g},"
+                               f"{_length(use.get('y')) or 0.0:g})".strip())
+            inner = ET.SubElement(g, svg("svg"), {k: v for k, v in ref.attrib.items() if k not in
+                                                  ("id", "x", "y", "width", "height")})
+            inner.set("width", f"{w:g}")
+            inner.set("height", f"{h:g}")
+            for c in ref:
+                c = copy.deepcopy(c)
+                for e in c.iter():
+                    e.attrib.pop("id", None)
+                inner.append(c)
+            par = parent[use]
+            par.insert(list(par).index(use), g)
+            par.remove(use)
+            changed = True
+        if not changed:
+            break
+    parent = {c: p for p in root.iter() for c in p}
+    for el in [e for e in root.iter() if _local(e.tag) == "svg" and e is not root]:
+        x, y = _length(el.get("x")) or 0.0, _length(el.get("y")) or 0.0
+        if (x or y) and el in parent:
+            g = ET.Element(svg("g"), {"transform": f"translate({x:g},{y:g})"})
+            par = parent[el]
+            par.insert(list(par).index(el), g)
+            par.remove(el)
+            g.append(el)
+            el.attrib.pop("x", None)
+            el.attrib.pop("y", None)
+
+    hidden_uses = []
+
+    def walk(el, color, vis):
+        if not isinstance(el.tag, str):
+            return
+        tag, st = _local(el.tag), _decls(el.get("style"))
+        c = st.get("color") or el.get("color")
+        color = c if c and c not in ("inherit", "currentColor") else color
+        v = st.pop("visibility", None) or el.attrib.pop("visibility", None)
+        vis = v if v and v != "inherit" else vis
+        for k in ("fill", "stroke", "stop-color"):
+            if (st.get(k) or "").strip() == "currentColor":
+                st[k] = color
+            if (el.get(k) or "").strip() == "currentColor":
+                el.set(k, color)
+        for k in _STYLE_TO_ATTR:                     # style beats the attribute, so this keeps
+            if k in st:                              # the cascade the same
+                el.set(k, st.pop(k))
+        sw = el.get("stroke-width")
+        if sw and re.search(r"[a-z]", sw, re.I) and _length(sw) is not None:
+            el.set("stroke-width", f"{_length(sw):g}")
+        if vis in ("hidden", "collapse"):
+            if tag in _SHAPES:
+                st.update(fill="none", stroke="none")
+            elif tag == "use":
+                hidden_uses.append(el)
+        if tag == "rect":
+            subs = _shape_subs(el, "rect")
+            rx, ry = _length(el.get("rx")) or 0.0, _length(el.get("ry")) or 0.0
+            if subs and (rx > 0 or ry > 0) and len(subs[0][1]) > 4:
+                for k in ("x", "y", "width", "height", "rx", "ry"):
+                    el.attrib.pop(k, None)
+                el.tag = svg("path")
+                el.set("d", _subs_d(subs))
+        if st:
+            el.set("style", _style_str(st))
+        else:
+            el.attrib.pop("style", None)
+        for ch in el:
+            walk(ch, color, vis)
+
+    walk(root, "black", "visible")
+    parent = {c: p for p in root.iter() for c in p}
+    for el in hidden_uses:
+        if el in parent:
+            parent[el].remove(el)
+
+
+def _subs_d(subs):
+    f = lambda p: f"{p[0]:.6f},{p[1]:.6f}"
+    out = []
+    for start, segs, closed in subs:
+        out.append("M" + f(start))
+        out.extend(("L" + f(s[1])) if s[0] == "L" else f"C{f(s[1])} {f(s[2])} {f(s[3])}" for s in segs)
+        if closed:
+            out.append("Z")
+    return " ".join(out)
 
 
 # ------------------------------------------------------------------------------
