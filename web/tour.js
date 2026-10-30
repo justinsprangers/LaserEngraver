@@ -1,8 +1,9 @@
 // tour.js: the tutorial, built like ToolTrace's. Each step dims the page, spotlights one control
 // and explains it in a small card (End / Back / Next). The page stays usable underneath, so people
 // can try things as they go. It can load a sample photo, and starts by itself on the first visit;
-// the Tutorial button replays it. Uses app.js globals: files, openFiles, selectFile, closeFile,
-// setView, view, S, LS, el, fail.
+// the Tutorial button replays it. In Design mode it's the Design-mode tour (DESIGN_STEPS).
+// Uses app.js globals: files, openFiles, selectFile, closeFile, setView, view, S, LS, el, fail,
+// and design.js's DM.
 "use strict";
 
 (function () {
@@ -71,19 +72,90 @@
       "<ul><li><b>Photo tuning</b>: shadow recovery, local contrast, sharpening.</li>" +
       "<li><b>Comic tuning</b>: tone bands, dot spacing, ink lines.</li>" +
       "<li>Save a look you like as a <b>preset</b> (kept in this browser).</li></ul>" },
+    { target: sec("extras"), before: basicTab, title: "Extras", html:
+      "<ul><li><b>Also download cut outline</b>: a red cut line around the subject, as an SVG.</li>" +
+      "<li><b>Make test card</b>: a 3×3 grid of the photo at different contrast and gamma. Burn it on scrap and copy the best tile's numbers.</li></ul>" },
     { target: "#downloadBtn", title: "Download", html:
-      "<ul><li><b>Download PNG</b> saves the selected photo's engraving; <b>Download all</b> does every photo.</li>" +
-      "<li>The file name includes the material, size and DPI.</li>" +
-      "<li>For a red cut line around the subject, tick <b>Also download cut outline</b> under Extras.</li></ul>" },
+      "<ul><li><b>Download PNG</b> (<kbd>Ctrl</kbd>+<kbd>S</kbd>) saves the selected photo's engraving; <b>Download all</b> does every photo.</li>" +
+      "<li>The file name includes the material, size and DPI.</li></ul>" },
     { target: "footer.status", title: "Job time", html:
-      "<ul><li>The estimate is the rough engraving time.</li>" +
-      "<li>Type your laser's engraving speed (mm/s) so it fits your machine.</li></ul>" },
+      "<ul><li>The estimate is the rough engraving (and cutting) time.</li>" +
+      "<li>Type your laser's engrave and cut speeds (mm/s) so it fits your machine.</li></ul>" },
+    { target: "#modeSeg", title: "Design mode", html:
+      "<ul><li>For layouts with several photos, logos, SVG / DXF files, text and shapes, plus cut and score lines, switch to <b>Design</b>.</li>" +
+      "<li>The <b>Tutorial</b> button there tours Design mode.</li></ul>" },
     { title: "You're set", html:
       "<ul><li>In your laser software, engrave at the same DPI (254 = 0.1 mm line interval) and <b>turn its own dithering off</b>, or the dots get blotchy.</li>" +
       "<li>Burn a small test on scrap first.</li>" +
       "<li><b>Tutorial</b> (top right) replays this tour.</li></ul>" +
       '<p class="tour-note" id="tourSampleNote" hidden>The sample photo is closed when the tour ends.</p>' },
   ];
+
+  // Design mode's tour (Tutorial in Design mode). Uses design.js's DM.
+  const dsec = (slug) => `#pane-design [data-sec="${slug}"]`;
+  const tab = (name) => () => q(`.tab[data-tab="${name}"]`).click();
+  const DESIGN_STEPS = [
+    { title: "Design mode", noNext: true, html:
+      "<p>Lay out several items on one canvas and save one engraving plus cut and score lines, ready for your laser software:</p>" +
+      "<ol><li><b>Set</b> the canvas (your material)</li><li><b>Add</b> photos, logos, SVG / DXF files, text and shapes</li>" +
+      "<li><b>Arrange</b> them and choose engrave, score or cut</li><li><b>Save</b> the engraving and line files</li></ol>" +
+      '<div class="tour-acts"><button class="btn primary" data-act="dsample">Try it with a sample photo and text</button>' +
+      '<button class="btn" data-act="next">Use my own design</button></div>' },
+    { target: "#modeSeg", title: "Photos or Design", html:
+      "<ul><li><b>Photos</b>: one photo at a time, photo or comic style.</li>" +
+      "<li><b>Design</b>: a layout of several items. Each mode keeps its own settings.</li></ul>" },
+    { target: dsec("canvas-your-material"), before: tab("design"), title: "The canvas", html:
+      "<ul><li>Width and height are your material's size; <b>Preset</b> has common ones.</li>" +
+      "<li><b>Resize from</b>: what stays put when you drag a corner (hold <kbd>Ctrl</kbd> for the other one).</li></ul>" },
+    { target: dsec("material-output"), before: tab("design"), title: "Material and DPI", html:
+      "<ul><li>Material, DPI, invert and mirror apply to the whole design.</li>" +
+      "<li>Mirror flips the engraving and the cut lines together, for the back of clear acrylic.</li></ul>" },
+    { target: ".layers", title: "Layers and Add", html:
+      "<ul><li><b>Add</b>: photo, logo (PNG), vector file (SVG, DXF), text, arc text, or a rectangle, circle or line that you drag out on the canvas (<kbd>Esc</kbd> cancels).</li>" +
+      "<li>The list is top first: ▲ / ▼ change the order, plus Copy, Hide and Delete.</li>" +
+      "<li>You can also drop photos and SVG / DXF files on the page.</li></ul>" },
+    { target: "#stage", before: () => setView("layout"), title: "Arrange", html:
+      "<ul><li>Drag to move: edges and centers snap (pink lines); <kbd>Alt</kbd> moves freely.</li>" +
+      "<li>Corner squares resize; the circle on top rotates (<kbd>Shift</kbd> = 15° steps).</li>" +
+      "<li><kbd>Ctrl</kbd>+click picks the item underneath; arrow keys nudge.</li>" +
+      "<li>Wheel zooms; drag empty space to pan.</li></ul>" },
+    { target: "#designViews", title: "Layout and Design views", html:
+      "<ul><li><b>Layout</b> is fast for arranging: photos are shown as plain pictures.</li>" +
+      "<li><b>Design</b> shows the real engraving in the material's colors.</li>" +
+      "<li>Red lines are cuts, blue lines are scores.</li></ul>" },
+    { target: "#pane-layer", before: () => {
+      if (!DM.selected && DM.design && DM.design.layers.length) DM.select(DM.design.layers[DM.design.layers.length - 1].id);
+      tab("layer")();
+    }, title: "The Layer tab", html:
+      "<ul><li><b>Output</b>: <b>Engrave</b> it, <b>Score</b> a light line along it, or <b>Cut</b> along it.</li>" +
+      "<li>Exact position, size and rotation, plus the item's own settings (text, font, shape…).</li>" +
+      "<li>Score / cut items can be <b>welded</b>, reduced to their <b>outer outline</b>, or <b>offset</b>.</li>" +
+      "<li>SVG / DXF files choose a job for each color instead.</li></ul>" },
+    { target: ".tabs", title: "Photo layers", html:
+      "<ul><li>Select a photo layer and the <b>Basic</b>, <b>Photo tuning</b> and <b>Comic tuning</b> tabs set that photo's style, tone and background removal.</li>" +
+      "<li>Its own views (Original, Cut-out, Engraving…) and the background fix tools work as in Photos mode.</li></ul>" },
+    { target: dsec("export"), before: tab("design"), title: "Export options", html:
+      "<ul><li><b>Cut / score files</b>: SVG and / or DXF, one file per job.</li>" +
+      "<li><b>Alignment frame</b>: a green canvas-sized box in those files, to line them up with the PNG.</li>" +
+      "<li><b>All-in-one file</b>: image and lines in one SVG or PDF (LightBurn, Trotec Ruby, xTool).</li>" +
+      "<li><b>Save test copy</b>: the whole design shrunk, to try on scrap.</li></ul>" },
+    { target: "#exportBtn", title: "Save engraving", html:
+      "<ul><li>Downloads the engraving PNG and the <code>_cut</code> / <code>_score</code> / <code>_combined</code> files you chose.</li>" +
+      "<li>Your browser may ask once to allow several downloads.</li></ul>" },
+    { target: "#saveProjectBtn", title: "Projects", html:
+      "<ul><li>Your design is kept in this browser automatically, even after a reload.</li>" +
+      "<li><b>Save project</b> (<kbd>Ctrl</kbd>+<kbd>S</kbd>) writes a <code>.lep</code> file that also opens in the desktop app; <b>Open…</b> loads one.</li>" +
+      "<li><b>Clear saved design</b> (Design tab) forgets the browser's copy.</li></ul>" },
+    { target: "footer.status", title: "Job time", html:
+      "<ul><li>Engraving and cutting time from your engrave and cut speeds.</li>" +
+      "<li>The engraving part updates when you look at the Design view.</li></ul>" },
+    { title: "You're set", html:
+      "<ul><li><kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Ctrl</kbd>+<kbd>Y</kbd> undo and redo; <kbd>Ctrl</kbd>+<kbd>D</kbd> duplicates; <kbd>Delete</kbd> removes.</li>" +
+      "<li>In your laser software, engrave the PNG at the same DPI with its own dithering off.</li>" +
+      "<li><b>Tutorial</b> (top right) replays this tour.</li></ul>" +
+      '<p class="tour-note" id="tourSampleNote" hidden>The sample photo and text are removed when the tour ends.</p>' },
+  ];
+  let steps = STEPS, sampleLayers = [];
 
   // ---------- Engine ----------
 
@@ -104,6 +176,7 @@
       else if (act === "back") go(idx - 1);
       else if (act === "end") end();
       else if (act === "sample") loadSample(e.target);
+      else if (act === "dsample") loadDesignSample(e.target);
     });
     window.addEventListener("resize", () => open && place());
     window.addEventListener("scroll", () => open && place(false), true);
@@ -127,6 +200,24 @@
     if (open) go(idx + 1);
   }
 
+  // Design tour: a sample photo and a text layer, removed again when the tour ends.
+  async function loadDesignSample(btn) {
+    btn.disabled = true;
+    btn.textContent = "Adding the sample…";
+    try {
+      const before = new Set(DM.design.layers.map((l) => l.id));
+      const r = await fetch(SAMPLE.url);
+      if (!r.ok) throw new Error(`status ${r.status}`);
+      await DM.addFiles([new File([await r.blob()], SAMPLE.name, { type: "image/jpeg" })]);
+      DM.addSimple("text");
+      sampleLayers = DM.design.layers.filter((l) => !before.has(l.id)).map((l) => l.id);
+      usedSample = sampleLayers.length > 0;
+    } catch (err) {
+      fail(`Couldn't load the sample: ${err.message}`);
+    }
+    if (open) go(idx + 1);
+  }
+
   function targetEl(st) {
     if (!st.target) return null;
     let t = q(val(st.target));
@@ -137,17 +228,17 @@
 
   function go(i) {
     if (i < 0) return;
-    if (i >= STEPS.length) { end(); return; }
+    if (i >= steps.length) { end(); return; }
     idx = i;
-    const st = STEPS[i];
+    const st = steps[i];
     try { if (st.before) st.before(); } catch (e) { console.error(e); }
-    card.querySelector(".tour-step").textContent = `Step ${i + 1} of ${STEPS.length}`;
+    card.querySelector(".tour-step").textContent = `Step ${i + 1} of ${steps.length}`;
     card.querySelector("h3").textContent = st.title;
     card.querySelector(".tour-body").innerHTML = val(st.html);
     const nav = card.querySelector(".tour-nav");
     nav.querySelector('[data-act="back"]').disabled = i === 0;
     nav.querySelector('[data-act="next"]').hidden = !!st.noNext;
-    nav.querySelector('[data-act="next"]').textContent = i === STEPS.length - 1 ? "Finish" : "Next";
+    nav.querySelector('[data-act="next"]').textContent = i === steps.length - 1 ? "Finish" : "Next";
     const note = q("#tourSampleNote");
     if (note) note.hidden = !usedSample;
     place();
@@ -158,7 +249,7 @@
   // Spotlight the step's control (scrolled into view) and put the card beside it, or centre the
   // card when there's nothing to point at.
   function place(scroll = true) {
-    const st = STEPS[idx], t = targetEl(st);
+    const st = steps[idx], t = targetEl(st);
     if (t && scroll) t.scrollIntoView({ block: "nearest", inline: "nearest" });
     const vw = window.innerWidth, vh = window.innerHeight, cw = card.offsetWidth, ch = card.offsetHeight, pad = 6;
     if (!t) {                                   // nothing to point at: dim everything, card centred
@@ -185,11 +276,13 @@
   }
 
   function start() {
-    if (DM.active) DM.leave();           // the tour shows Photos mode
     if (!dim) build();
     const help = q("#help");
     if (help.open) help.close();
+    steps = DM.active ? DESIGN_STEPS : STEPS;       // the tour of the mode you're in
+    window.tour.steps = steps;
     usedSample = false;
+    sampleLayers = [];
     saved = { view, compare: q("#compare").checked };
     open = true;
     document.body.classList.add("touring");
@@ -203,7 +296,14 @@
     document.body.classList.remove("touring");
     dim.hidden = hi.hidden = card.hidden = true;
     // Put things back: the sample photo goes (photos you opened stay), and the view you had.
-    if (usedSample) {
+    if (usedSample && steps === DESIGN_STEPS) {
+      const gone = new Set(sampleLayers);
+      if (DM.design && DM.design.layers.some((l) => gone.has(l.id))) {
+        DM.design.layers = DM.design.layers.filter((l) => !gone.has(l.id));
+        DM.select(DM.design.layers.length ? DM.design.layers[DM.design.layers.length - 1].id : null);
+        DM.changed();
+      }
+    } else if (usedSample) {
       const f = files.find((x) => x.name === SAMPLE.name);
       if (f) closeFile(f);
     }
@@ -220,14 +320,14 @@
     if (!open) return;
     if (e.key === "Escape") end();
     else if (e.key === "ArrowRight" || (e.key === "Enter" && !e.target.closest("button"))) {
-      if (!STEPS[idx].noNext) go(idx + 1);
+      if (!steps[idx].noNext) go(idx + 1);
     } else if (e.key === "ArrowLeft") go(idx - 1);
     else return;
     e.preventDefault();
     e.stopPropagation();
   }, true);
 
-  window.tour = { start, end, steps: STEPS };
+  window.tour = { start, end, steps, designSteps: DESIGN_STEPS };
   q("#tourBtn").addEventListener("click", start);
   q("#helpTourBtn").addEventListener("click", start);
   q("#emptyTourBtn").addEventListener("click", start);

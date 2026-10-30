@@ -3,18 +3,19 @@
 ## Status
 - **Desktop app** (v1.11.0, from source; installer not rebuilt yet): Photos mode (photo/comic styles, four dither modes, AI background removal with direction-locked fix strokes, crop/rotate, job estimate) and Design mode (layered layouts, `.lep` projects).
 - **v1.11 Design mode = file prep without Inkscape:** vector files (SVG, PDF, AI, DXF) at real size, a job per color (engrave / score / cut / blank / ignore), Break apart / Split by color, SVG text converted with the installed fonts, Score output for every layer, weld / outer outline / offset, smooth curves, one export file per job plus an all-in-one SVG / PDF.
-- **Web version** (`web/`, GitHub Pages): photo/comic + background fix tools. **Design mode in progress** (user-approved 6-phase plan):
+- **Web version** (`web/`, GitHub Pages): photo/comic + background fix tools + test card, and **Design mode (all 6 phases done)**. Intended desktop/web differences are the README table "Web version: differences from the desktop app" (audited 2026-10-30). Phases (user-approved plan):
   1. Engine in the browser: **done** (engine.py design API, bundled fonts, desktop comparison, timings in CLAUDE.md).
   2. Design UI: **done** (`web/design.js`: layers panel + Add menu, drag/resize/rotate/snap, draw-to-add shapes, Layer + Design tabs, Layout/Design views, undo/redo, keys, add font; photo layers reuse the Basic/Photo/Comic tabs, photo views and fix tools). Not tested: fix strokes on a design photo layer (AI model not cached in the test browser), touch input.
   3. **Done.** Engrave/score/cut controls + export downloads, pure-Python PDF writer (no PyMuPDF in Pyodide), test copy, .lep open/save, browser autosave + "Clear saved design", canvas-size/memory guard.
   4. **Done.** Vector files: SVG via `_prepare_svg` + own pure-Python geometry reader (instead of MuPDF), DXF via ezdxf wheel **stored in the repo** (not fetched from PyPI), color jobs, Break apart / Split by color.
   5. PDF/AI on the web: deferred (desktop only) unless the user asks.
-  6. Next. Tutorial steps + README.
+  6. **Done.** Design-mode tutorial (`DESIGN_STEPS`), Help dialog section + key list, README / CLAUDE.md, desktop-vs-web audit.
 
 ## Next steps
 - Try real files in the laser programs: does the all-in-one PDF/SVG bring in the image and the red/blue layers in LightBurn, Ruby, xTool, and does LaserGRBL's Append line up with the frame? Then update the README table.
 - Rebuild the installer (`build.bat`) once tested from source. A scratch PyInstaller bundle passed the self-test with ezdxf + shapely included.
-- Manually check the web tutorial and start-screen buttons in a real browser (Ctrl+F5 once).
+- Manually check the web tutorials (Photos and Design) and the top bar's look in a real browser (Ctrl+F5 once); screenshots timed out during testing, so layout was only checked by script.
+- Not tested in the web version: fix strokes on a design photo layer, touch input, the Chrome save/open dialogs, and real-world SVG / DXF files.
 
 ## Decisions & gotchas
 - See `CLAUDE.md` for the pixel-identical rule, cache-version bumps, vector-file pipeline and testing constraints.
@@ -27,6 +28,7 @@
 - JPEG photos aren't pixel-identical between browser and desktop (libjpeg 9 vs libjpeg-turbo); PNGs are. Affects Photos mode too (found 2026-10-29).
 
 ## Log
+- 2026-10-30: Web phase 6 + desktop/web audit: Design tour, Help, engrave + cut speeds and Design estimate, test card, C / Ctrl+S / double right-click, gradients black on web too
 - 2026-10-30: Unsized `<use>` of a `<symbol>` now fills 100% of its viewport (desktop + web), like Inkscape
 - 2026-10-30: Desktop SVG: patch what MuPDF misreads (fill-rule/opacity in style, units, currentColor, visibility, nested svg, symbol sizes, rounded rects)
 - 2026-10-30: Web Design mode phase 4: SVG without MuPDF (vecfile._load_svg_plain), DXF via ezdxf wheel, vector panel

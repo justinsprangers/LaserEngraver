@@ -167,6 +167,25 @@ def export(fid, settings_json, strokes_json="[]"):
     return _js(out)
 
 
+def test_card(fid, settings_json, strokes_json="[]"):
+    """The desktop's Make test card (core.test_card): a 3x3 contrast x gamma grid of the photo's
+    center, as a PNG with the desktop's file name."""
+    import os
+    f = _files[fid]
+    s = core.Settings.from_dict(json.loads(settings_json))
+    if s.remove_bg and f["alpha"] is not None:
+        alpha, src = _refined(f, json.loads(strokes_json))
+    else:
+        src, alpha = f["gray"], None
+    src, alpha = core.prepare(src, alpha, s)
+    card = core.test_card(src, alpha, s)
+    buf = io.BytesIO()
+    card.save(buf, "PNG", dpi=(s.dpi, s.dpi))
+    base = os.path.splitext(os.path.basename(f["name"]))[0]
+    return _js({"png": to_js(memoryview(buf.getvalue())),
+                "filename": f"{base}_testcard_{s.material}_{s.style}_{s.dpi}dpi.png"})
+
+
 # --- Design mode -----------------------------------------------------------------------------
 # The desktop's design.py / vectors.py do the work. Differences in the browser:
 #   - fonts are the bundled ones in web/fonts (plus any the user adds), not the installed ones;
@@ -484,6 +503,29 @@ def render_region(design_json, x0, y0, x1, y1):
         region[sub_cov] = ink[cy0 - y0:cy1 - y0, cx0 - x0:cx1 - x0][sub_cov]
     return _js({"x": px0, "y": py0, "w": int(burn.shape[1]), "h": int(burn.shape[0]),
                 "burn": to_js(memoryview(np.ascontiguousarray(burn, dtype=np.uint8).ravel()))})
+
+
+def design_estimate(design_json, mode="layout", preview_dpi=0):
+    """For the job-time estimate, like the desktop's Design / Layout views: cut + score line
+    length (mm) always; engraving stats (core.raster_stats, scaled to the design's DPI when shown
+    at a lower one) and the share of the area burned only for the Design view."""
+    import design as D
+    import vectors
+    d = json.loads(design_json)
+    full = d["dpi"]
+    if mode == "layout":
+        r = _design["layout"]
+    else:
+        r = _design["full"]
+        if preview_dpi and preview_dpi < full:
+            d["dpi"] = int(preview_dpi)
+    burn, cover = r.compose(d)
+    out = {"cut_mm": vectors.path_length_mm(D.all_vectors(d, r, cover)), "stats": None, "fill": None}
+    if mode != "layout":
+        k = full / d["dpi"]
+        px, rows = core.raster_stats(burn)
+        out.update(stats=[px * k, rows * k], fill=float(burn.mean()))
+    return json.dumps(out)
 
 
 def read_asset(path):

@@ -185,6 +185,7 @@ Object.assign(DM, {
     this.commitNow();
     this.active = false;
     this.updateTitle();
+    updateEstimate();
     LS.set("mode", "photos");
     setModeButtons("photos");
     document.body.classList.remove("design-mode");
@@ -451,6 +452,8 @@ Object.assign(DM, {
     this.dirty = dirty;
     this.ver++;
     this.detail = null;
+    this.est = this.fill = null;
+    updateEstimate();
     this.refreshDesignTab();
     const top = design.layers[design.layers.length - 1];
     this.select(top ? top.id : null);
@@ -470,7 +473,7 @@ Object.assign(DM, {
   testFactor() { return (this.design.test_pct ?? 25) / 100; },
   updateTestSize() {
     const f = this.testFactor(), c = this.design.canvas, t = $("#testSize");
-    if (t) t.textContent = `→ ${(c.width_in * f).toFixed(2)} × ${(c.height_in * f).toFixed(2)} in`;
+    if (t) t.textContent = `Test copy: ${(c.width_in * f).toFixed(2)} × ${(c.height_in * f).toFixed(2)} in`;
   },
 
   // ================================================================ saving files
@@ -782,11 +785,35 @@ Object.assign(DM, {
       if (cache.size <= used.size + KEEP_SPARE) break;
       if (!used.has(k)) cache.delete(k);
     }
-    if (!this.pending) this.stale[mode] = false;
+    if (!this.pending) {
+      this.stale[mode] = false;
+      if (!this.drag) this.estimate(mode);
+    }
     this.info2 = `${(ms / 1000).toFixed(2)} s`;
     this.refreshFields();
     this.updateInfo();
     if (this.shown()) draw();
+  },
+  // Job-time estimate, like the desktop: cut / score length from either view; the engraving
+  // part (and the burned area) only from the Design view, kept while you're on the Layout view.
+  est: null, fill: null, estBusy: false, estAgain: null,
+  async estimate(mode) {
+    if (this.estBusy) { this.estAgain = mode; return; }
+    this.estBusy = true;
+    try {
+      const r = await call("designEstimate", { design: this.design, mode,
+        previewDpi: mode === "design" ? this.previewDpi() : 0 });
+      this.est = { stats: r.stats || (this.est && this.est.stats) || null, dpi: this.design.dpi, cut: r.cut_mm };
+      if (r.fill != null) this.fill = r.fill;
+      updateEstimate();
+      this.updateInfo();
+    } catch { /* no estimate */ } finally {
+      this.estBusy = false;
+      doneProgress();
+      const again = this.estAgain;
+      this.estAgain = null;
+      if (again && this.active) this.estimate(again);
+    }
   },
   // Layout: gray as rendered. Design: ink / blank in the material's colors (the Material look).
   async bitmap(mode, e) {
@@ -810,6 +837,7 @@ Object.assign(DM, {
     const d = this.design, n = d.layers.length;
     let t = `Canvas ${d.canvas.width_in} × ${d.canvas.height_in} in @ ${d.dpi} DPI  ·  ${n} layer${n === 1 ? "" : "s"}`;
     if (view === "design") {
+      if (this.fill != null) t += `  ·  laser fires on ${(this.fill * 100).toFixed(0)}% of the area`;
       const p = this.previewDpi();
       if (p) t += `  ·  shown at ${p} DPI (big canvas; the saved engraving is full ${d.dpi} DPI)`;
       if (d.mirror) t += "  ·  mirrored on export";

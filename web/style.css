@@ -168,7 +168,8 @@ body.dragging .drop { display: flex; }
   border-top: 1px solid var(--border); font-size: 13px; flex-wrap: wrap; }
 .status .grow { flex: 1; }
 .speed { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
-.speed input { width: 70px; height: 26px; }
+.speed input { width: 64px; height: 26px; }
+.speed label { display: inline-flex; align-items: center; gap: 4px; }
 .bar { width: 160px; height: 6px; background: var(--trough); border-radius: 3px; overflow: hidden; }
 .bar > div { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
 .bar.indeterminate > div { width: 30%; animation: slide 1.1s linear infinite; }

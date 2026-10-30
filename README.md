@@ -13,9 +13,10 @@ There are two versions that share the same processing code (`engrave_core.py`):
 - **Desktop app** (Windows): everything, including background-removal fixes and Design mode.
 - **Web version** (`web/`): runs in any modern browser with nothing to install, for sharing
   (e.g. a makerspace). Photo and comic styles, AI background removal with the same fix tools
-  (smart keep / remove, brush keep / erase), presets, materials and PNG / outline downloads.
-  Design mode too, with SVG and DXF files (PDF and Illustrator files need the desktop app).
-  Photos are processed on the viewer's own computer, never uploaded.
+  (smart keep / remove, brush keep / erase), presets, materials, test card, PNG / outline
+  downloads, and Design mode with SVG and DXF files. What only the desktop app has is listed
+  under [Web version: differences](#web-version-differences-from-the-desktop-app). Photos are
+  processed on the viewer's own computer, never uploaded.
 
 ## Web version
 
@@ -46,10 +47,12 @@ How it works:
 - Fix strokes use the desktop's format and `core.refine_alpha`, so they behave the same. They're
   kept per photo until it's closed or the page is reloaded (photos aren't stored).
 - **Tutorial** (`web/tour.js`, same style as ToolTrace's): starts by itself on a first visit;
-  the **Tutorial** button (top right), Help, or the start screen replay it. It spotlights each
-  control in the order you'd use it (the page stays usable underneath) and can load a sample
-  photo (`web/samples/`), which it closes again at the end. To change the wording or order, edit
-  the `STEPS` list in `tour.js`.
+  the **Tutorial** button (top right), Help, or the start screen replay it. It tours the mode
+  you're in: Photos mode (`STEPS`) or Design mode (`DESIGN_STEPS`). It spotlights each control
+  in the order you'd use it (the page stays usable underneath) and can load a sample photo
+  (`web/samples/`; in Design mode a sample photo and text layer), which it removes again at the
+  end. To change the wording or order, edit those lists in `tour.js`. (The desktop app has no
+  tutorial; its Help opens this README.)
 - After changing `style.css`, `app.js`, `design.js`, `tour.js` or `worker.js`, bump the `?v=`
   number in `web/index.html` (all four links), so browsers load the new files instead of a cached copy.
 - Presets, your own materials, settings and theme are saved in the browser (localStorage). The
@@ -57,7 +60,7 @@ How it works:
   version, so a shared computer always has the originals; **Save as…** makes a personal copy.
 - The interface (`web/index.html`, `app.js`, `style.css`) is separate from the desktop's, so
   new interface features have to be added to each version.
-- **Design mode (in progress):** **Photos | Design** at the top left. The browser runs the
+- **Design mode:** **Photos | Design** at the top left. The browser runs the
   desktop's design engine (`design.py`, `vectors.py`) through `web/engine.py`; the screens are
   in `web/design.js` and work like the desktop's: add photos, logos, text, arc text and drawn
   shapes, move / resize / rotate them with snapping, Layout and Design views, undo, Engrave /
@@ -80,6 +83,28 @@ How it works:
 
 First visit downloads about 20 MB (Python + libraries, from the jsDelivr CDN); the AI model
 (176 MB) downloads the first time someone removes a background.
+
+### Web version: differences from the desktop app
+
+Same engine, same output files, same names, same defaults (engrave 150 / cut 15 mm/s for the
+job time). What differs, and why:
+
+| Desktop only, or different on the web | Why |
+|---|---|
+| Opening PDF and Illustrator (.ai) files | They need PyMuPDF, which has no browser build. SVG and DXF work. |
+| Background-removal models: the web has General (u2net) only | The other models are 180-970 MB; one model is already a 176 MB download. |
+| Choosing a save folder, **Process all** into it, **Also save side-by-side preview JPG** | Browsers download files one by one (**Download all**) and can't write to a folder. |
+| Changing keyboard shortcuts (⌨ Shortcuts), UI size (Ctrl+= / Ctrl+-) | The web keys are fixed (Help lists them); use the browser's own zoom. |
+| Ctrl+0 / Ctrl+1 to fit / 100% | Browsers keep those for their own zoom and tabs: the web uses F or 0 and the **1:1** button. |
+| Fonts: your installed fonts | Browsers can't hand them to the page: the web has the fonts in `web/fonts/` plus any you add (Arial, Times New Roman and Courier New use look-alikes with the same widths). Text can differ by a few edge dots (an older FreeType in the browser). |
+| DXF text in CAD fonts (e.g. AutoCAD's `txt`) | Drawn with Arimo on the web, with the font itself on a desktop that has it installed. |
+| JPEG photos | The browser decodes JPEGs very slightly differently, so their dots can differ. PNGs match exactly. |
+| Test card labels | The desktop writes them in Arial Bold; the web uses Pillow's built-in font. The tiles are the same. |
+| SVG reading | The desktop reads SVGs with PyMuPDF (after fixing what it misreads), the web with its own reader; both give the same shapes. Text on a path: the desktop draws it with a stand-in font, the web leaves it out (the Layer tab says so). |
+| Saved state | The desktop autosaves settings and the open design every minute to `settings.json`; the web keeps them in the browser (localStorage / IndexedDB), and Photos-mode photos aren't kept. |
+
+Web-only extras: keys 1–5 switch views, a Tutorial, and a full-resolution Design view when you
+zoom in on a big canvas.
 
 ## Install it (normal use)
 
@@ -200,7 +225,9 @@ in `settings.json`.
 | Ctrl+S | Save engraving (Photos mode) / save project (Design mode) |
 | Ctrl+D, Delete, arrow keys | Duplicate, delete, nudge the selected item (Design; Shift = bigger nudge) |
 
-Shortcuts are ignored while you're typing in a field.
+Shortcuts are ignored while you're typing in a field. The web version uses the same keys
+except Ctrl+0 / Ctrl+1 (use F or 0, and the 1:1 button), can't change them, and adds 1–5 for
+the views; its Help lists them.
 
 ### Output files
 
@@ -328,8 +355,8 @@ default) and DXF files.
   invisible (fully transparent) fills and lines, line widths in pt / mm, `currentColor`, hidden
   items, nested drawings, symbols (with or without a size) and rounded-rectangle corners. (The desktop app
   rewrites these before PyMuPDF reads the file, because PyMuPDF misreads them; the web version
-  has its own reader.) Gradients come in as one solid color: black on the desktop, the first
-  gradient color on the web.
+  has its own reader.) Gradients and patterns come in as solid black, in both versions (the
+  Layer tab says so).
 - **Not imported** (the Layer tab lists what applies to the file): pictures inside a vector
   file (add them as Photo layers), clipping masks (the hidden parts come in too), text along a
   path, old Inkscape flowed text, DXF points. Dashed lines come in solid. Only the first page
@@ -493,7 +520,7 @@ Run `python engrave_core.py -h` for all options.
 | `settings.json` | Remembers your last settings and file list (created automatically, not in git). |
 | `output/` | Default save folder (not in git). |
 | `index.html` | Forwards to the web version (for GitHub Pages). |
-| `web/` | The web version: page (`index.html`, `app.js`, `style.css`), `worker.js` (Pyodide + AI model), `engine.py` (glue to `engrave_core`), `models/` (u2net in pieces), `tools/split_model.py`. |
+| `web/` | The web version: page (`index.html`, `app.js`, `style.css`), `design.js` (Design mode screens), `tour.js` (tutorial), `worker.js` (Pyodide + AI model), `engine.py` (glue to `engrave_core` / `design`), `models/` (u2net in pieces), `fonts/` (open-licence fonts), `wheels/` (ezdxf), `samples/`, `tools/` (`split_model.py`, `make_fonts.py`, `compare_design.py`). |
 
 ## License
 

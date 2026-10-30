@@ -8,7 +8,7 @@
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <!-- ?v= makes browsers fetch a fresh copy after an update: bump it (all four, same number)
      whenever style.css, app.js, design.js, tour.js or worker.js change. -->
-<link rel="stylesheet" href="style.css?v=10">
+<link rel="stylesheet" href="style.css?v=11">
 </head>
 <body>
 <header class="topbar">
@@ -146,9 +146,10 @@
   <span id="status">Starting…</span>
   <div class="bar" id="bar" hidden><div></div></div>
   <span class="grow"></span>
-  <span id="estimate" class="muted photos-only"></span>
-  <label class="speed photos-only" title="Your laser's engraving speed, for the time estimate">Speed
-    <input id="speed" type="number" min="1" max="2000" step="10" value="300"> mm/s</label>
+  <span id="estimate" class="muted" title="Rough job time. Engraving: each line is scanned from its first to its last burned dot, plus 2.5 mm overscan at each end, at the engrave speed. Cutting: total cut-line length at the cut speed. Ignores acceleration and multiple passes, so real jobs usually take longer."></span>
+  <span class="speed" title="Your laser's speeds, for the time estimate">
+    <label>Engrave <input id="speed" type="number" min="1" max="5000" step="10" value="150"></label>
+    <label>Cut <input id="cutSpeed" type="number" min="0.5" max="500" step="1" value="15"></label> mm/s</span>
 </footer>
 
 <div id="loading" class="overlay">
@@ -164,7 +165,7 @@
   <form method="dialog" class="dlg">
     <div class="tour-cta">
       <div><b>New here?</b> The tutorial points out every tool on the page and walks through the
-        whole process, with a sample photo to practice on.</div>
+        whole process, with a sample photo to practice on. In Design mode it tours Design mode.</div>
       <button class="btn primary" id="helpTourBtn" type="button">Start the tutorial</button>
     </div>
     <h2>How to use</h2>
@@ -196,10 +197,36 @@
     <p>Fixes apply in order. <b>Undo</b> (Ctrl+Z) removes the last one. <b>[</b> and <b>]</b>
       change the brush size; right-drag or Space+drag pans while a tool is active. Fixes stay
       with the photo until you close it or reload the page.</p>
+    <h3>Design mode</h3>
+    <p>Switch <b>Photos | Design</b> (top left) to lay out photos, logos, vector files (SVG, DXF),
+      text, arc text and shapes on one canvas, then <b>Save engraving</b>: the engraving PNG plus
+      cut (red) and score (blue) files, or one all-in-one SVG / PDF.</p>
+    <ul>
+      <li><b>Add</b> (left) puts items on the canvas. Shapes: pick one, then drag on the canvas
+        (Ctrl = square / circle, Shift = from the center, Esc cancels).</li>
+      <li>Drag to move (edges snap; Alt = no snapping), corner squares resize, the circle on top
+        rotates (Shift = 15° steps). Ctrl+click picks the item underneath.</li>
+      <li><b>Layer</b> tab: position, size, and Engrave / Score / Cut for the selected item; vector
+        files get a job per color. Photo layers use the Basic / Photo / Comic tabs.</li>
+      <li><b>Design</b> tab: canvas size, material, DPI, export options and a test copy.</li>
+      <li><b>Layout</b> view is fast for arranging; <b>Design</b> view shows the real engraving.</li>
+      <li>Your design is kept in this browser. <b>Save project</b> writes a <code>.lep</code> file that also
+        opens in the desktop app. PDF and Illustrator files need the desktop app.</li>
+    </ul>
+    <h3>Keys</h3>
+    <ul>
+      <li><b>Both modes:</b> wheel zooms, drag empty space (or right-drag / Space+drag) pans,
+        F or 0 fits, double right-click fits, + / − zoom, C compare, Ctrl+S save
+        (engraving in Photos, project in Design).</li>
+      <li><b>Photos:</b> 1–5 views, K / R smart keep / remove, B / E brush keep / erase, P or Esc
+        pan, [ ] brush size, Ctrl+Z undo a fix.</li>
+      <li><b>Design:</b> Ctrl+Z / Ctrl+Y undo / redo, Ctrl+D duplicate, Delete, arrows nudge
+        (Shift = bigger steps).</li>
+    </ul>
     <h3>Tips</h3>
     <ul>
-      <li>Mouse wheel zooms, drag to pan. <b>1:1</b> shows one laser dot per screen pixel.
-        Keys 1–5 switch views, F fits.</li>
+      <li><b>1:1</b> shows one laser dot per screen pixel.</li>
+      <li>The job time (bottom right) uses your engrave and cut speeds.</li>
       <li>Not sure about contrast or gamma? Burn a small test on scrap first.</li>
       <li>Presets and your own materials are saved in this browser only. The built-in
         materials can't be changed; use <b>Save as…</b> to make your own version.</li>
@@ -212,8 +239,8 @@
   </form>
 </dialog>
 
-<script src="app.js?v=10"></script>
-<script src="design.js?v=10"></script>
-<script src="tour.js?v=10"></script>
+<script src="app.js?v=11"></script>
+<script src="design.js?v=11"></script>
+<script src="tour.js?v=11"></script>
 </body>
 </html>

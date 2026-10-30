@@ -246,6 +246,22 @@ function buildBasic(p) {
   s = section(p, "Extras");
   checkbox(s, "outline", "Also download cut outline (SVG)", "A red cut line around the subject, at true size.");
   slider(s, "outline_offset_in", 0, 0.5, 0.01, "Outline offset (in)");
+  const tc = el("button", { className: "btn sm", textContent: "Make test card ⓘ", type: "button", id: "testCardBtn",
+    style: "margin-top:8px", title: "Downloads a 3x3 grid of this photo's center at different contrast (columns) " +
+      "and gamma (rows). Burn it on scrap, then type the numbers under the best tile into Contrast and Gamma." });
+  tc.addEventListener("click", makeTestCard);
+  s.append(tc);
+}
+
+async function makeTestCard() {
+  if (!current) return alert("Select a photo first. The card uses its center.");
+  showProgress("Making the test card…", null);
+  try {
+    const r = await call("testCard", { id: current.id, settings: jobSettings(current), strokes: current.strokes });
+    saveBlob(new Blob([r.png], { type: "image/png" }), r.filename);
+    doneProgress();
+    setStatus(`Downloaded ${r.filename}`);
+  } catch (e) { fail(`Test card failed: ${e.message}`); }
 }
 
 function ditherSelect() { return select("dither", DEF.dither_modes.map((m) => [m, m])); }
@@ -646,17 +662,21 @@ function updateInfo() {
   updateEstimate();
 }
 
-// Same as engrave_core.estimate_seconds / format_duration.
-function updateEstimate() {
-  if (!views) { $("#estimate").textContent = ""; return; }
-  const [px, rows] = views.stats, speed = +$("#speed").value;
-  if (!rows) { $("#estimate").textContent = "nothing to burn"; return; }
-  if (!(speed > 0)) { $("#estimate").textContent = ""; return; }
-  const sec = Math.round((px * 25.4 / S.dpi + rows * 2 * 2.5) / speed);
+// Same as engrave_core.estimate_seconds / format_duration and the desktop's update_estimate.
+// Photos mode: the current photo's engraving. Design mode: DM.est (engraving + cut / score lines).
+function formatDuration(sec) {
+  sec = Math.round(sec);
   const hh = Math.floor(sec / 3600), mm = Math.floor(sec % 3600 / 60), ss = sec % 60;
-  const d = hh ? `${hh} h ${String(mm).padStart(2, "0")} min` : mm ? `${mm} min ${String(ss).padStart(2, "0")} s` : `${ss} s`;
-  $("#estimate").textContent = `engrave ≈ ${d}`;
-  $("#estimate").title = "Rough estimate: scanned length plus overscan at constant speed. Real jobs usually take a bit longer.";
+  return hh ? `${hh} h ${String(mm).padStart(2, "0")} min` : mm ? `${mm} min ${String(ss).padStart(2, "0")} s` : `${ss} s`;
+}
+function updateEstimate() {
+  const e = DM.active ? DM.est : views ? { stats: views.stats, dpi: S.dpi, cut: 0 } : null;
+  const out = $("#estimate");
+  if (!e || !((e.stats && e.stats[1]) || e.cut)) { out.textContent = e && e.stats ? "nothing to burn" : ""; return; }
+  const ev = +$("#speed").value, cv = +$("#cutSpeed").value, parts = [];
+  if (e.stats && e.stats[1] && ev > 0) parts.push(`engrave ≈ ${formatDuration((e.stats[0] * 25.4 / e.dpi + e.stats[1] * 2 * 2.5) / ev)}`);
+  if (e.cut && cv > 0) parts.push(`cut ≈ ${formatDuration(e.cut / cv)}`);
+  out.textContent = parts.join("  ·  ") || "nothing to burn";
 }
 
 // ============================================================ preview canvas
@@ -855,7 +875,12 @@ canvas.addEventListener("wheel", (e) => {
 }, { passive: false });
 let drag = null;
 canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+let lastRight = 0;
 canvas.addEventListener("pointerdown", (e) => {
+  if (e.button === 2) {                       // double right-click: zoom to fit (as on the desktop)
+    if (performance.now() - lastRight < 400) { lastRight = 0; fit(); return; }
+    lastRight = performance.now();
+  }
   if (DM.shown()) return DM.pointerdown(e);
   canvas.setPointerCapture(e.pointerId);
   const r = canvas.getBoundingClientRect(), sx = e.clientX - r.left, sy = e.clientY - r.top;
@@ -1000,16 +1025,25 @@ $("#themeBtn").addEventListener("click", () => {
 applyTheme(LS.get("theme", "system"));
 
 $("#helpBtn").addEventListener("click", () => $("#help").showModal());
-const speed = $("#speed");
-speed.value = LS.get("speed", 300);
-speed.addEventListener("change", () => { LS.set("speed", +speed.value); updateEstimate(); });
+// Same defaults as the desktop app (engrave 150, cut 15 mm/s).
+for (const [id, key, def] of [["#speed", "speed", 150], ["#cutSpeed", "cutSpeed", 15]]) {
+  const inp = $(id);
+  inp.value = LS.get(key, def);
+  inp.addEventListener("input", () => { LS.set(key, +inp.value); updateEstimate(); });
+}
 
 // Same keys as the desktop app's defaults where they exist.
 window.addEventListener("keydown", (e) => {
   if (e.target instanceof Element && e.target.matches("input[type=number], input[type=text], select, textarea")) return;
   if (DM.active && DM.key(e)) return;
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { e.preventDefault(); undoStroke(); return; }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") { e.preventDefault(); $("#downloadBtn").click(); return; }
   if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.key.toLowerCase() === "c" && !DM.shown()) {               // Compare (as on the desktop)
+    $("#compare").checked = !$("#compare").checked;
+    draw();
+    return;
+  }
   const viewKeys = { "1": "original", "2": "adjusted", "3": "engraving", "4": "look", "5": "cutout" };
   const toolKeys = { k: "keep", r: "remove", b: "paint_keep", e: "paint_remove", p: "pan" };
   const k = e.key.toLowerCase();

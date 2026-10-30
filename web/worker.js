@@ -244,7 +244,13 @@ const handlers = {
     const json = await prepareDesign(design, "design");
     return engine.render_region(json, ...box);
   },
-  readAsset: ({ path }) => engine.read_asset(path),  addVector: async ({ design, path, name }) => {
+  readAsset: ({ path }) => engine.read_asset(path),
+  testCard: async ({ id, settings, strokes = [] }) => {
+    if (settings.remove_bg) await cutout(id);
+    return engine.test_card(id, JSON.stringify(settings), JSON.stringify(strokes));
+  },
+  designEstimate: async ({ design, mode, previewDpi = 0 }) =>
+    JSON.parse(engine.design_estimate(await prepareDesign(design, mode), mode, previewDpi)),  addVector: async ({ design, path, name }) => {
     await designInit();
     await ensureVectorTools([path]);
     progress(`Reading ${name}…`, null);

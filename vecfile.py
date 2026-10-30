@@ -445,6 +445,8 @@ def _prepare_svg(raw, stand_in=None, as_tree=False, mupdf=False):
         notes.append("Clipping masks are ignored: parts hidden by a clip are imported too.")
     if images:
         notes.append("Pictures inside this file aren't imported: add them as Photo layers.")
+    if any(_local(e.tag) in ("linearGradient", "radialGradient", "pattern") for e in root.iter()):
+        notes.append("Gradients and patterns come in as solid black.")
     parent = {c: p for p in root.iter() for c in p}
     for el in [e for e in root.iter() if _local(e.tag) == "text"]:
         try:
@@ -635,8 +637,8 @@ def _subs_d(subs):
 # ------------------------------------------------------------------------------
 # Same result format as _load_mupdf: paths, rects, circles, ellipses, lines, polylines and
 # polygons with their transforms, <use> / <symbol>, nested <svg>, inherited styles. Not drawn
-# (as on the desktop): clipping, masks, pictures, markers. Gradients and patterns are taken as
-# one solid color.
+# (as on the desktop): clipping, masks, pictures, markers. Gradients and patterns are black,
+# as MuPDF gives them on the desktop.
 
 _CSS_COLORS = dict(zip(*[iter("""
 aliceblue f0f8ff antiquewhite faebd7 aqua 00ffff aquamarine 7fffd4 azure f0ffff beige f5f5dc bisque ffe4c4
@@ -944,19 +946,8 @@ def _color(v, st, ids):
         return None
     if v == "currentColor":
         return _color(st.get("color", "black"), {}, ids)
-    m = re.match(r"url\(\s*['\"]?#([^)'\"]+)['\"]?\s*\)\s*(.*)", v)
-    if m:                                           # gradient / pattern: its first stop's color
-        ref = ids.get(m.group(1))
-        seen = set()
-        while ref is not None and id(ref) not in seen:
-            seen.add(id(ref))
-            stops = [s for s in ref if _local(s.tag) == "stop"]
-            if stops:
-                s = stops[0]
-                return _color(_decls(s.get("style")).get("stop-color") or s.get("stop-color") or "black", {}, ids)
-            href = ref.get(f"{{{XLINK_NS}}}href") or ref.get("href") or ""
-            ref = ids.get(href[1:]) if href.startswith("#") else None
-        return _color(m.group(2), st, ids) if m.group(2) else "#000000"
+    if v.startswith("url("):
+        return "#000000"                # gradient / pattern: black, as the desktop (MuPDF) reads it
     if v.startswith("#"):
         h = v[1:]
         if len(h) in (3, 4):
@@ -1084,8 +1075,6 @@ def _load_svg_plain(raw):
         notes.append("Some text couldn't be converted to outlines and was left out.")
     if "marker" in skipped or any(_local(e.tag) == "marker" for e in root.iter()):
         notes.append("Line-end markers (arrowheads) aren't imported.")
-    if any(_local(e.tag) in ("linearGradient", "radialGradient", "pattern") for e in root.iter()):
-        notes.append("Gradients and patterns are taken as one solid color.")
     return {"kind": "svg", "w_in": w_in, "h_in": h_in, "sized": sized, "items": items, "notes": notes}
 
 
